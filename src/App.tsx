@@ -128,7 +128,7 @@ const calculateScheduledTrigger = (dateStr: string, type: 'healthCheck' | 'eveni
     targetDate.setHours(16, 10, 0, 0);
   } else if (type === 'morningVaccine') {
     targetDate.setDate(targetDate.getDate() - 1);
-    targetDate.setHours(20, 0, 0, 0); // 1 Gün önce saat 20:00 yapıldı
+    targetDate.setHours(20, 0, 0, 0); // Sabah aşısı için 1 gün önce saat 20:00
   }
 
   return targetDate.toISOString();
@@ -215,6 +215,7 @@ export default function App() {
   ) => {
     if (!toUser) return;
     try {
+      // 1. Bildirimi veritabanına yaz
       await addDoc(collection(db, 'notifications'), {
         toUser,
         fromUser: displayUser,
@@ -226,6 +227,18 @@ export default function App() {
         read: false,
         createdAt: new Date().toISOString()
       });
+
+      // 2. ANINDA BİLDİRİM TETİKLEYİCİSİ (Ping to Netlify)
+      const triggerTime = new Date(triggerAt).getTime();
+      const nowTime = Date.now();
+
+      // Eğer bildirim anlık bir işlemse (60 saniye toleransla) beklemeden Netlify'ı uyandır
+      if (triggerTime <= nowTime + 60000) {
+        fetch('/.netlify/functions/check-and-send-push', { 
+          method: 'POST' 
+        }).catch((err) => console.warn('Netlify anında tetiklenemedi:', err));
+      }
+
     } catch (err) {
       console.error('Bildirim eklenemedi:', err);
     }
@@ -254,7 +267,7 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // CİHAZ FCM TOKEN KAYDI (Hata Yakalamalı)
+  // CİHAZ FCM TOKEN KAYDI
   useEffect(() => {
     if (user && displayUser && displayUser !== 'Koordinatör') {
       try {
@@ -265,7 +278,7 @@ export default function App() {
     }
   }, [user, displayUser]);
 
-  // CANLI BİLDİRİM LİSTESİ DİNLEYİCİSİ (Hata Yakalamalı)
+  // CANLI BİLDİRİM LİSTESİ DİNLEYİCİSİ
   useEffect(() => {
     if (!user || !displayUser) return;
 
@@ -306,7 +319,6 @@ export default function App() {
             return timeB - timeA;
           });
 
-          // Tarayıcı sekme içi bildirim uyarısı
           try {
             if ('Notification' in window && Notification.permission === 'granted') {
               const latestUnread = list.find(n => !n.read);
