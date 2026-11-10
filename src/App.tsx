@@ -337,7 +337,7 @@ export default function App() {
           });
 
           const latestUnread = list.find(n => !n.read);
-          if (latestUnread && !activeModalNotification) {
+          if (latestUnread) {
             setActiveModalNotification(latestUnread);
           }
 
