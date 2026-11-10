@@ -128,7 +128,7 @@ const calculateScheduledTrigger = (dateStr: string, type: 'healthCheck' | 'eveni
     targetDate.setHours(16, 10, 0, 0);
   } else if (type === 'morningVaccine') {
     targetDate.setDate(targetDate.getDate() - 1);
-    targetDate.setHours(20, 0, 0, 0); // Sabah aşısı için 1 gün önce saat 20:00
+    targetDate.setHours(20, 0, 0, 0);
   }
 
   return targetDate.toISOString();
@@ -150,6 +150,7 @@ export default function App() {
 
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [showNotifMenu, setShowNotifMenu] = useState(false);
+  const [activeModalNotification, setActiveModalNotification] = useState<NotificationItem | null>(null);
 
   const [openAuditLogIds, setOpenAuditLogIds] = useState<Record<string, boolean>>({});
   const [savedStatusNoteId, setSavedStatusNoteId] = useState<string | null>(null);
@@ -215,7 +216,6 @@ export default function App() {
   ) => {
     if (!toUser) return;
     try {
-      // 1. Bildirimi veritabanına yaz
       await addDoc(collection(db, 'notifications'), {
         toUser,
         fromUser: displayUser,
@@ -228,11 +228,9 @@ export default function App() {
         createdAt: new Date().toISOString()
       });
 
-      // 2. ANINDA BİLDİRİM TETİKLEYİCİSİ (Ping to Netlify)
       const triggerTime = new Date(triggerAt).getTime();
       const nowTime = Date.now();
 
-      // Eğer bildirim anlık bir işlemse (60 saniye toleransla) beklemeden Netlify'ı uyandır
       if (triggerTime <= nowTime + 60000) {
         fetch('/.netlify/functions/check-and-send-push', { 
           method: 'POST' 
@@ -266,27 +264,7 @@ export default function App() {
     });
     return () => unsubscribe();
   }, []);
-// Netlify Fonksiyonunu Otomatik Uyandıran ve Tetikleyen Polling Mekanizması
-useEffect(() => {
-  const triggerPushCheck = async () => {
-    try {
-      const response = await fetch('/.netlify/functions/check-and-send-push', {
-        method: 'POST'
-      });
-      const data = await response.json();
-      console.log("[Push Sync] Periyodik kontrol tetiklendi:", data);
-    } catch (error) {
-      console.error('[Push Sync] Tetikleme hatası:', error);
-    }
-  };
 
-  // Uygulama açıldığı an hemen bir kez tetikle
-  triggerPushCheck();
-
-  // Arka planda sunucuyu canlı tutmak ve kuyruğu işlemek için her 2 dakikada bir (120000 ms) tekrarla
-  const interval = setInterval(triggerPushCheck, 120000);
-  return () => clearInterval(interval);
-}, []);
   // CİHAZ FCM TOKEN KAYDI
   useEffect(() => {
     if (user && displayUser && displayUser !== 'Koordinatör') {
@@ -298,7 +276,26 @@ useEffect(() => {
     }
   }, [user, displayUser]);
 
-  // CANLI BİLDİRİM LİSTESİ DİNLEYİCİSİ
+  // ARKA PLAN PERİYODİK NETLIFY TETİKLEYİCİSİ (Polling)
+  useEffect(() => {
+    const triggerPushCheck = async () => {
+      try {
+        const response = await fetch('/.netlify/functions/check-and-send-push', {
+          method: 'POST'
+        });
+        const data = await response.json();
+        console.log("[Push Sync] Periyodik kontrol tetiklendi:", data);
+      } catch (error) {
+        console.error('[Push Sync] Tetikleme hatası:', error);
+      }
+    };
+
+    triggerPushCheck();
+    const interval = setInterval(triggerPushCheck, 120000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // CANLI BİLDİRİM LİSTESİ DİNLEYİCİSİ & AÇILIR MODAL TETİKLEYİCİSİ
   useEffect(() => {
     if (!user || !displayUser) return;
 
@@ -339,18 +336,9 @@ useEffect(() => {
             return timeB - timeA;
           });
 
-          try {
-            if ('Notification' in window && Notification.permission === 'granted') {
-              const latestUnread = list.find(n => !n.read);
-              if (latestUnread && !notifications.some(existing => existing.id === latestUnread.id && !existing.read)) {
-                new Notification(latestUnread.title, {
-                  body: latestUnread.message,
-                  icon: '/favicon.ico'
-                });
-              }
-            }
-          } catch (notifErr) {
-            console.warn('Tarayıcı bildirim fırlatılamadı:', notifErr);
+          const latestUnread = list.find(n => !n.read);
+          if (latestUnread && !activeModalNotification) {
+            setActiveModalNotification(latestUnread);
           }
 
           setNotifications(list);
@@ -543,7 +531,6 @@ useEffect(() => {
     };
     await handleSaveDonor(updated);
 
-    // Ana dosya sorumlusu atandığında anında bildirim gönder
     if (assignedMember && assignedMember.toLowerCase() !== displayUser.toLowerCase()) {
       createNotification(
         assignedMember,
@@ -632,7 +619,6 @@ useEffect(() => {
     handleSaveDonor(updated);
   };
 
-  // ADIM DEĞİŞİMİ: SAĞLIK KONTROLÜ İÇİN BİLDİRİM VE TAMAMLANMA KURALLARI
   const handleStepFieldChange = async (
     donorId: string,
     field: 'healthCheck' | 'publicHealth' | 'transplantTube' | 'idm' | 'postTransplantCheck',
@@ -664,7 +650,6 @@ useEffect(() => {
     };
     await handleSaveDonor(updated);
 
-    // KURAL: Sağlık kontrolü atandığında 1 gün önce 16:00'da bildirim
     if (field === 'healthCheck' && key === 'completedBy' && value) {
       const triggerTime = calculateScheduledTrigger(donor.healthCheck?.date || '', 'healthCheck');
       createNotification(
@@ -677,7 +662,6 @@ useEffect(() => {
       );
     }
 
-    // KURAL: Sağlık kontrolü tamamlandığında sadece Burak'a anında bildirim
     if (field === 'healthCheck' && key === 'completed' && value === true) {
       if (displayUser.toLowerCase() !== 'burak') {
         createNotification(
@@ -808,7 +792,6 @@ useEffect(() => {
     alert('10 Doz aşı planı ve Nakil Sonrası Sağlık tarihi (+20 gün) başarıyla oluşturuldu!');
   };
 
-  // AŞI DOZU ATAMA (AKŞAM -> GÜNÜNDE 16:10, SABAH -> 1 GÜN ÖNCE 20:00) & BİTTİĞİNDE SADECE BURAK'A BİLDİRİM
   const handleVaccineDoseChange = async (
     donorId: string,
     index: number,
@@ -1212,7 +1195,6 @@ useEffect(() => {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 py-5 space-y-4">
-        {/* 4 Ana Sekme */}
         <div className="flex items-center gap-2 border-b border-slate-200 pb-3 overflow-x-auto">
           <button
             onClick={() => setCurrentTab('operation')}
@@ -1259,7 +1241,6 @@ useEffect(() => {
           </button>
         </div>
 
-        {/* 1. SEKME: Bağışçı Süreçleri */}
         {currentTab === 'operation' && (
           <div className="space-y-4">
             <OperationalTasks
@@ -1268,7 +1249,6 @@ useEffect(() => {
               onSelectDonor={handleSelectDonorFromPlan}
             />
 
-            {/* Manuel Bağışçı Ekleme Formu */}
             <div className="bg-white p-4 rounded-2xl shadow-xs border border-slate-200 space-y-2.5">
               <div className="flex justify-between items-center">
                 <h2 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
@@ -1304,7 +1284,6 @@ useEffect(() => {
 
             <ExcelManager donors={donors} />
 
-            {/* Bağışçı Ara & Yıl Filtresi */}
             <div className="bg-white p-4 rounded-2xl shadow-xs border border-slate-200 space-y-2.5">
               <div className="flex justify-between items-center">
                 <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
@@ -1337,7 +1316,6 @@ useEffect(() => {
               </div>
             </div>
 
-            {/* Aylık Akordiyon Bağışçı Havuzu */}
             <div className="space-y-4">
               {filteredDonors.length === 0 ? (
                 <div className="bg-white p-8 rounded-2xl text-center text-xs text-slate-400 border border-slate-200">
@@ -1601,7 +1579,6 @@ useEffect(() => {
           </div>
         )}
 
-        {/* 2. SEKME: Bu Haftanın İşleri */}
         {currentTab === 'this-week' && (
           <WeeklyPlanTab
             donors={donors}
@@ -1610,7 +1587,6 @@ useEffect(() => {
           />
         )}
 
-        {/* 3. SEKME: Önümüzdeki Haftanın İşleri */}
         {currentTab === 'next-week' && (
           <WeeklyPlanTab
             donors={donors}
@@ -1619,9 +1595,54 @@ useEffect(() => {
           />
         )}
 
-        {/* 4. SEKME: Detaylı Raporlar */}
         {currentTab === 'reporting' && <ReportingTab donors={donors} />}
       </main>
+
+      {/* ANLIK AÇILIR BİLDİRİM (MODAL) */}
+      {activeModalNotification && (
+        <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in">
+          <div className="bg-white rounded-3xl p-6 sm:p-7 max-w-md w-full space-y-4 shadow-2xl border border-slate-100 text-center">
+            <div className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-2xl mx-auto flex items-center justify-center text-2xl shadow-xs">
+              🔔
+            </div>
+            <div>
+              <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-full">
+                Yeni Bildirim / İşlem
+              </span>
+              <h3 className="font-bold text-slate-800 text-base mt-2">
+                {activeModalNotification.title}
+              </h3>
+              <p className="text-xs text-slate-600 mt-2 leading-relaxed bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
+                {activeModalNotification.message}
+              </p>
+            </div>
+            
+            <div className="flex flex-col sm:flex-row gap-2 pt-1">
+              <button
+                onClick={() => {
+                  markNotificationAsRead(activeModalNotification.id);
+                  if (activeModalNotification.donorId) {
+                    handleSelectDonorFromPlan(activeModalNotification.donorId);
+                  }
+                  setActiveModalNotification(null);
+                }}
+                className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 rounded-xl text-xs transition shadow-md cursor-pointer"
+              >
+                İlgili Bağışçı Karta Git ➔
+              </button>
+              <button
+                onClick={() => {
+                  markNotificationAsRead(activeModalNotification.id);
+                  setActiveModalNotification(null);
+                }}
+                className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-2.5 px-4 rounded-xl text-xs transition cursor-pointer"
+              >
+                Okundu Olarak Kapat
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 10 Doz Aşı Modalı */}
       {activeVaccineDonor && (
