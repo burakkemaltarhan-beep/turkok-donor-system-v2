@@ -128,7 +128,7 @@ const calculateScheduledTrigger = (dateStr: string, type: 'healthCheck' | 'eveni
     targetDate.setHours(16, 10, 0, 0);
   } else if (type === 'morningVaccine') {
     targetDate.setDate(targetDate.getDate() - 1);
-    targetDate.setHours(18, 0, 0, 0);
+    targetDate.setHours(20, 0, 0, 0); // 1 Gün önce saat 20:00 yapıldı
   }
 
   return targetDate.toISOString();
@@ -510,6 +510,18 @@ export default function App() {
       ]
     };
     await handleSaveDonor(updated);
+
+    // Ana dosya sorumlusu atandığında anında bildirim gönder
+    if (assignedMember && assignedMember.toLowerCase() !== displayUser.toLowerCase()) {
+      createNotification(
+        assignedMember,
+        'Yeni Dosya Sorumluluğu',
+        `${donor.name} isimli bağışçının dosya takibi size atanmıştır.`,
+        donor.id,
+        donor.name,
+        new Date().toISOString()
+      );
+    }
   };
 
   const toggleDonorOpen = (id: string) => {
@@ -764,7 +776,7 @@ export default function App() {
     alert('10 Doz aşı planı ve Nakil Sonrası Sağlık tarihi (+20 gün) başarıyla oluşturuldu!');
   };
 
-  // AŞI DOZU ATAMA (AKŞAM -> GÜNÜNDE 16:10, SABAH -> 1 GÜN ÖNCE 18:00) & BİTTİĞİNDE SADECE BURAK'A BİLDİRİM
+  // AŞI DOZU ATAMA (AKŞAM -> GÜNÜNDE 16:10, SABAH -> 1 GÜN ÖNCE 20:00) & BİTTİĞİNDE SADECE BURAK'A BİLDİRİM
   const handleVaccineDoseChange = async (
     donorId: string,
     index: number,
@@ -805,7 +817,7 @@ export default function App() {
       createNotification(
         val,
         isEvening ? 'Akşam Aşısı Görevi' : 'Sabah Aşısı Görevi',
-        `${donor.name} bağışçısının ${doseLabel} görevi size atanmıştır (${isEvening ? 'Bugün 16:10' : '1 Gün Önce 18:00'} bildirimi).`,
+        `${donor.name} bağışçısının ${doseLabel} görevi size atanmıştır (${isEvening ? 'Bugün 16:10' : '1 Gün Önce 20:00'} bildirimi).`,
         donor.id,
         donor.name,
         triggerTime
