@@ -266,7 +266,27 @@ export default function App() {
     });
     return () => unsubscribe();
   }, []);
+// Netlify Fonksiyonunu Otomatik Uyandıran ve Tetikleyen Polling Mekanizması
+useEffect(() => {
+  const triggerPushCheck = async () => {
+    try {
+      const response = await fetch('/.netlify/functions/check-and-send-push', {
+        method: 'POST'
+      });
+      const data = await response.json();
+      console.log("[Push Sync] Periyodik kontrol tetiklendi:", data);
+    } catch (error) {
+      console.error('[Push Sync] Tetikleme hatası:', error);
+    }
+  };
 
+  // Uygulama açıldığı an hemen bir kez tetikle
+  triggerPushCheck();
+
+  // Arka planda sunucuyu canlı tutmak ve kuyruğu işlemek için her 2 dakikada bir (120000 ms) tekrarla
+  const interval = setInterval(triggerPushCheck, 120000);
+  return () => clearInterval(interval);
+}, []);
   // CİHAZ FCM TOKEN KAYDI
   useEffect(() => {
     if (user && displayUser && displayUser !== 'Koordinatör') {
