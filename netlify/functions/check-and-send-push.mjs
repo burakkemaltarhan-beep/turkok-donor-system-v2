@@ -33,10 +33,11 @@ const handler = async () => {
   const messaging = getMsg();
 
   if (!db || !messaging) {
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: 'Firebase Admin başlatılamadı, ortam değişkenlerini kontrol edin.' }),
-    };
+    // V2 API Response Kullanımı
+    return new Response(JSON.stringify({ error: 'Firebase Admin başlatılamadı, ortam değişkenlerini kontrol edin.' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   const now = new Date();
@@ -103,20 +104,22 @@ const handler = async () => {
       }
     }
 
-    return {
-      statusCode: 200,
-      body: JSON.stringify({
-        message: 'Kontrol tamamlandı.',
-        sentCount,
-        timestamp: nowIso,
-      }),
-    };
+    // V2 API Response Kullanımı
+    return new Response(JSON.stringify({
+      message: 'Kontrol tamamlandı.',
+      sentCount,
+      timestamp: nowIso,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
   } catch (error) {
     console.error('[Push Cron] Genel hata:', error);
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: error.message }),
-    };
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 };
 
