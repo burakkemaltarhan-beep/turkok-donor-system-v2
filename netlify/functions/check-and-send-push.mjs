@@ -1,126 +1,93 @@
-import { schedule } from '@netlify/functions';
-import { initializeApp, getApps, cert } from 'firebase-admin/app';
+import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 
-// Firebase Admin SDK'yı sadece bir kez başlat
+// Firebase Admin SDK başlatma (Mükerrer başlatmayı önler)
 if (!getApps().length) {
-  const projectId = process.env.FIREBASE_PROJECT_ID || 'kizilay-c3c96';
-  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
-  // Netlify ortam değişkenindeki \n kaçış karakterlerini gerçek satır sonlarına çevir
-  const privateKey = process.env.FIREBASE_PRIVATE_KEY
-    ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
-    : undefined;
-
-  if (clientEmail && privateKey) {
+  try {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
     initializeApp({
-      credential: cert({
-        projectId,
-        clientEmail,
-        privateKey,
-      }),
+      credential: cert(serviceAccount)
     });
-  } else {
-    console.warn('[Push Cron] Firebase Admin kimlik değişkenleri eksik!');
+  } catch (e) {
+    console.error('Firebase Admin başlatılamadı:', e);
   }
 }
 
-const getDb = () => (getApps().length ? getFirestore() : null);
-const getMsg = () => (getApps().length ? getMessaging() : null);
+const db = getFirestore();
+const messaging = getMessaging();
 
-const handler = async () => {
-  const db = getDb();
-  const messaging = getMsg();
-
-  if (!db || !messaging) {
-    // V2 API Response Kullanımı
-    return new Response(JSON.stringify({ error: 'Firebase Admin başlatılamadı, ortam değişkenlerini kontrol edin.' }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-
-  const now = new Date();
-  const nowIso = now.toISOString();
-
+export default async (req, context) => {
   try {
+    const now = new Date();
+    const nowTime = now.getTime();
+
+    // 1. Okunmamış ve vakti gelmiş bildirimleri çek
     const snapshot = await db.collection('notifications')
       .where('read', '==', false)
       .get();
 
+    if (snapshot.empty) {
+      return new Response(JSON.stringify({ success: true, message: 'Gönderilecek bildirim yok.' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
     let sentCount = 0;
 
-    for (const docSnapshot of snapshot.docs) {
-      const notif = docSnapshot.data();
+    for (const docSnap of snapshot.docs) {
+      const data = docSnap.data();
+      const triggerTime = data?.triggerAt ? new Date(data.triggerAt).getTime() : 0;
 
-      // Zaten gönderildiyse atla
-      if (notif.sent === true) continue;
+      // Vakti geldiyse veya geçmişse bildirimi işle
+      if (triggerTime <= nowTime + 60000) {
+        const toUser = data.toUser;
+        if (!toUser) continue;
 
-      // triggerAt kontrolü
-      const triggerTime = notif.triggerAt ? new Date(notif.triggerAt).getTime() : 0;
-      if (triggerTime <= now.getTime()) {
-        const toUserKey = (notif.toUser || '').toLowerCase().trim();
+        // Kullanıcının FCM token'ını al
+        const tokenDoc = await db.collection('fcm_tokens').doc(toUser.toLowerCase()).get();
+        
+        if (tokenDoc.exists) {
+          const tokenData = tokenDoc.data();
+          const fcmToken = tokenData?.token;
 
-        // fcm_tokens koleksiyonundan cihaz jetonunu al
-        const tokenDoc = await db.collection('fcm_tokens').doc(toUserKey).get();
-
-        if (tokenDoc.exists && tokenDoc.data().token) {
-          const deviceToken = tokenDoc.data().token;
-
-          try {
-            await messaging.send({
-              token: deviceToken,
+          if (fcmToken) {
+            const message = {
+              token: fcmToken,
               notification: {
-                title: notif.title || 'TÜRKÖK Görev Bildirimi',
-                body: notif.message || 'Planlanmış bir göreviniz bulunmaktadır.',
+                title: data.title || 'TÜRKÖK Bildirim',
+                body: data.message || 'Yeni bir göreviniz var.'
               },
               data: {
-                donorId: notif.donorId || '',
-                url: '/',
-              },
-              webpush: {
-                headers: {
-                  Urgency: 'high',
-                },
-                notification: {
-                  icon: '/favicon.ico',
-                  badge: '/favicon.ico',
-                  requireInteraction: true,
-                },
-              },
-            });
+                donorId: data.donorId || ''
+              }
+            };
 
-            // Bildirimi iletildi olarak işaretle
-            await docSnapshot.ref.update({
-              sent: true,
-              sentAt: nowIso,
-            });
-
-            sentCount++;
-          } catch (sendErr) {
-            console.error(`[Push Cron] ${toUserKey} cihazına gönderim başarısız:`, sendErr);
+            try {
+              await messaging.send(message);
+              sentCount++;
+            } catch (err) {
+              console.error(`FCM Gönderim Hatası (${toUser}):`, err);
+            }
           }
         }
+
+        // Bildirimi okundu olarak işaretle (tekrar gitmemesi için)
+        await docSnap.ref.update({ read: true });
       }
     }
 
-    // V2 API Response Kullanımı
-    return new Response(JSON.stringify({
-      message: 'Kontrol tamamlandı.',
-      sentCount,
-      timestamp: nowIso,
-    }), {
+    return new Response(JSON.stringify({ success: true, sent: sentCount }), {
       status: 200,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' }
     });
 
   } catch (error) {
-    console.error('[Push Cron] Genel hata:', error);
+    console.error('Fonksiyon Çalışma Hatası:', error);
     return new Response(JSON.stringify({ error: error.message }), {
       status: 500,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' }
     });
   }
 };
-
-export default schedule('*/10 * * * *', handler);
