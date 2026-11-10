@@ -1090,7 +1090,7 @@ export default function App() {
               </button>
 
               {showNotifMenu && (
-                <div className="absolute right-0 mt-3 w-[85vw] sm:w-80 bg-white rounded-2xl shadow-2xl border border-slate-100 overflow-hidden z-50 text-slate-800">
+                <div className="fixed top-[70px] left-4 right-4 sm:absolute sm:top-auto sm:left-auto sm:right-0 sm:mt-3 sm:w-96 bg-white rounded-2xl shadow-2xl border border-slate-100 overflow-hidden z-50 text-slate-800">
                   <div className="p-4 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
                     <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
                       <span>🔔</span> Bildirimler ({unreadCount})
