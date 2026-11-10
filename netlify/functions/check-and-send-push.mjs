@@ -1,18 +1,19 @@
 import { schedule } from '@netlify/functions';
-import admin from 'firebase-admin';
+import { initializeApp, getApps, cert } from 'firebase-admin/app';
+import { getFirestore } from 'firebase-admin/firestore';
+import { getMessaging } from 'firebase-admin/messaging';
 
-// Firebase Admin SDK'yı sadece bir kez başlat
-if (!admin.apps.length) {
+// Firebase Admin uygulamasını başlat
+if (!getApps().length) {
   const projectId = process.env.FIREBASE_PROJECT_ID || 'kizilay-c3c96';
   const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
-  // Netlify ortam değişkenindeki \n karakterlerini gerçek satır sonuna çevir
   const privateKey = process.env.FIREBASE_PRIVATE_KEY
     ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
     : undefined;
 
   if (clientEmail && privateKey) {
-    admin.initializeApp({
-      credential: admin.credential.cert({
+    initializeApp({
+      credential: cert({
         projectId,
         clientEmail,
         privateKey,
@@ -23,10 +24,13 @@ if (!admin.apps.length) {
   }
 }
 
-const db = admin.apps.length ? admin.firestore() : null;
-const messaging = admin.apps.length ? admin.messaging() : null;
+const getDb = () => (getApps().length ? getFirestore() : null);
+const getMsg = () => (getApps().length ? getMessaging() : null);
 
 const handler = async () => {
+  const db = getDb();
+  const messaging = getMsg();
+
   if (!db || !messaging) {
     return {
       statusCode: 500,
@@ -38,7 +42,6 @@ const handler = async () => {
   const nowIso = now.toISOString();
 
   try {
-    // 1. Okunmamış bildirimleri çek
     const snapshot = await db.collection('notifications')
       .where('read', '==', false)
       .get();
@@ -51,19 +54,18 @@ const handler = async () => {
       // Zaten gönderildiyse atla
       if (notif.sent === true) continue;
 
-      // triggerAt kontrolü: Zamanı gelmiş mi?
+      // triggerAt kontrolü
       const triggerTime = notif.triggerAt ? new Date(notif.triggerAt).getTime() : 0;
       if (triggerTime <= now.getTime()) {
         const toUserKey = (notif.toUser || '').toLowerCase().trim();
 
-        // 2. Personelin (Özkan, Yiğit, Batuhan, Behlül, Yunus, Burak) FCM cihaz jetonunu al
+        // Burak, Özkan, Yiğit vb. personelin cihaz jetonunu al
         const tokenDoc = await db.collection('fcm_tokens').doc(toUserKey).get();
 
         if (tokenDoc.exists && tokenDoc.data().token) {
           const deviceToken = tokenDoc.data().token;
 
           try {
-            // 3. Kilit ekranı push bildirimini fırlat
             await messaging.send({
               token: deviceToken,
               notification: {
@@ -86,7 +88,6 @@ const handler = async () => {
               },
             });
 
-            // 4. Tekrar gitmemesi için bildirimi işaretle
             await docSnapshot.ref.update({
               sent: true,
               sentAt: nowIso,
@@ -94,7 +95,7 @@ const handler = async () => {
 
             sentCount++;
           } catch (sendErr) {
-            console.error(`[Push Cron] ${toUserKey} cihazına gönderim başarısız:`, sendErr);
+            console.error(`[Push Cron] ${toUserKey} cihazına gönderim hatası:`, sendErr);
           }
         }
       }
@@ -117,5 +118,4 @@ const handler = async () => {
   }
 };
 
-// Cron: "*/10 * * * *" -> Her 10 dakikada bir otomatik çalışır
 export default schedule('*/10 * * * *', handler);
