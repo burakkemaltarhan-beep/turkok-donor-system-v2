@@ -1090,24 +1090,24 @@ export default function App() {
               </button>
 
               {showNotifMenu && (
-                <div className="absolute right-0 mt-2 w-80 bg-white rounded-2xl shadow-2xl border border-slate-100 overflow-hidden z-50 text-slate-800">
-                  <div className="p-3 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+                <div className="absolute right-0 mt-3 w-[85vw] sm:w-80 bg-white rounded-2xl shadow-2xl border border-slate-100 overflow-hidden z-50 text-slate-800">
+                  <div className="p-4 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
                     <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                      <span>🔔</span> Bildirimler ({unreadCount} Okunmamış)
+                      <span>🔔</span> Bildirimler ({unreadCount})
                     </span>
                     {unreadCount > 0 && (
                       <button
                         onClick={markAllNotificationsAsRead}
-                        className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-800 transition cursor-pointer"
+                        className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 transition cursor-pointer bg-indigo-50 px-2.5 py-1 rounded-md"
                       >
                         Tümünü Oku
                       </button>
                     )}
                   </div>
 
-                  <div className="max-h-72 overflow-y-auto divide-y divide-slate-100">
+                  <div className="max-h-[60vh] sm:max-h-72 overflow-y-auto divide-y divide-slate-100">
                     {notifications.length === 0 ? (
-                      <div className="p-6 text-center text-xs text-slate-400">
+                      <div className="p-6 text-center text-xs text-slate-400 font-medium">
                         Henüz vakti gelmiş bir bildiriminiz bulunmuyor.
                       </div>
                     ) : (
@@ -1119,22 +1119,22 @@ export default function App() {
                             setShowNotifMenu(false);
                             if (notif.donorId) handleSelectDonorFromPlan(notif.donorId);
                           }}
-                          className={`p-3 text-xs cursor-pointer transition hover:bg-slate-50 ${
-                            !notif.read ? 'bg-indigo-50/50' : 'bg-white opacity-85'
+                          className={`p-4 sm:p-5 text-xs cursor-pointer transition hover:bg-slate-50 ${
+                            !notif.read ? 'bg-indigo-50/40' : 'bg-white opacity-90'
                           }`}
                         >
-                          <div className="flex items-center justify-between mb-1">
-                            <span className="font-bold text-indigo-900 text-[11px]">
+                          <div className="flex items-center justify-between mb-2 gap-2">
+                            <span className="font-bold text-indigo-900 text-xs truncate">
                               {notif.title}
                             </span>
-                            <span className="text-[9px] text-slate-400">
+                            <span className="text-[10px] text-slate-400 whitespace-nowrap font-medium">
                               {new Date(notif.createdAt).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}
                             </span>
                           </div>
-                          <p className="text-[11px] text-slate-600 leading-snug">
+                          <p className="text-[11.5px] text-slate-600 leading-relaxed mb-2">
                             {notif.message}
                           </p>
-                          <span className="text-[10px] text-indigo-600 font-semibold mt-1 inline-block hover:underline">
+                          <span className="text-[10px] text-indigo-600 font-bold inline-block hover:underline">
                             Karta Git ➔
                           </span>
                         </div>
@@ -1264,7 +1264,7 @@ export default function App() {
             <div className="bg-white p-4 rounded-2xl shadow-xs border border-slate-200 space-y-2.5">
               <div className="flex justify-between items-center">
                 <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                  🔍 Bağışçı Ara & Filtrele
+                  <span>🔍</span> Bağışçı Ara & Filtrele
                 </span>
                 <span className="text-[11px] text-slate-400 font-semibold">
                   Gösterilen: <strong className="text-indigo-600">{filteredDonors.length}</strong> / {donors.length}
