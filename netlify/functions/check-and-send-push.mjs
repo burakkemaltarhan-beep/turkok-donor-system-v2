@@ -2,12 +2,17 @@ import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 
-// Firebase Admin SDK başlatma (Mükerrer başlatmayı önler)
+// Firebase Admin SDK'yı Netlify ortam değişkenleriyle başlat
 if (!getApps().length) {
   try {
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
     initializeApp({
-      credential: cert(serviceAccount)
+      credential: cert({
+        projectId: process.env.FIREBASE_PROJECT_ID || "kizilay-c3c96",
+        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+        privateKey: process.env.FIREBASE_PRIVATE_KEY 
+          ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') 
+          : undefined
+      })
     });
   } catch (e) {
     console.error('Firebase Admin başlatılamadı:', e);
