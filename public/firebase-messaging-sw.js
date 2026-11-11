@@ -11,37 +11,13 @@ firebase.initializeApp({
   appId: "1:1069570752312:web:97101fd71c8a4f0f244bcd"
 });
 
+// SDK arka plan bildirimini otomatik ve TEK SEFERDE gösterir.
+// Çift bildirim olmaması için onBackgroundMessage KULLANILMAMALIDIR.
 const messaging = firebase.messaging();
-
-// Arka planda gelen mesajı yakala (Sadece data-only geldiğinde çiz, notification varsa tarayıcıya bırak)
-messaging.onBackgroundMessage((payload) => {
-  // Eğer tarayıcı zaten otomatik bildirim gösterecekse (payload.notification varsa) 
-  // çift bildirim olmaması için burada durdur:
-  if (payload.notification) {
-    return;
-  }
-
-  const title = payload.data?.title || 'TÜRKÖK Bildirim';
-  const options = {
-    body: payload.data?.body || 'Yeni bir göreviniz var.',
-    icon: '/favicon.ico',
-    badge: '/favicon.ico',
-    tag: payload.data?.notifId || 'turkok-bildirim',
-    renotify: true,
-    requireInteraction: true,
-    data: {
-      url: payload.data?.url || '/',
-      donorId: payload.data?.donorId || '',
-      notifId: payload.data?.notifId || ''
-    }
-  };
-
-  return self.registration.showNotification(title, options);
-});
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const targetUrl = event.notification.data?.url || '/';
+  const targetUrl = event.notification.data?.url || 'https://donortakip.netlify.app/';
 
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windowClients) => {
