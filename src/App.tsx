@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { onAuthStateChanged, signOut, signInWithEmailAndPassword } from 'firebase/auth';
 import type { User } from 'firebase/auth';
 import { collection, onSnapshot, query, orderBy, doc, setDoc, deleteDoc, addDoc, where } from 'firebase/firestore';
@@ -58,6 +58,7 @@ export interface NotificationItem {
   message: string;
   triggerAt: string;
   read: boolean;
+  pushStatus?: 'pending' | 'sending' | 'sent' | 'failed';
   createdAt: string;
 }
 
@@ -72,6 +73,14 @@ const authorizedUsers = [
   { name: "Behlül", email: "behlul@panel.com" },
   { name: "Yunus", email: "yunus@panel.com" },
 ];
+
+const stepLabels: Record<'healthCheck' | 'publicHealth' | 'transplantTube' | 'idm' | 'postTransplantCheck', string> = {
+  healthCheck: 'Sağlık Kontrolü',
+  publicHealth: 'Halk Sağlığı',
+  transplantTube: 'Nakil Merkezi Tüpü',
+  idm: 'IDM',
+  postTransplantCheck: 'Nakil Sonrası Sağlık'
+};
 
 export const getDonorSortKey = (d: Donor) => {
   if (!d.healthCheck?.date) return '9999-12';
@@ -174,6 +183,23 @@ export default function App() {
   const displayUser = getDisplayName(user?.email);
   const isManager = displayUser.toLowerCase() === 'burak';
 
+  // Merkezi Netlify Push Fonksiyonu Tetikleyicisi
+  const triggerPushCheck = useCallback(async () => {
+    try {
+      const response = await fetch('/.netlify/functions/check-and-send-push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        keepalive: true
+      });
+      if (response.ok) {
+        const data = await response.json();
+        console.log('[Push Sync] Kontrol tamamlandı:', data);
+      }
+    } catch (error) {
+      console.warn('[Push Sync] Tetikleme hatası:', error);
+    }
+  }, []);
+
   const handleSaveDonor = async (updatedDonor: Donor) => {
     try {
       const { id, ...dataToSave } = updatedDonor;
@@ -212,31 +238,33 @@ export default function App() {
     message: string,
     donorId: string,
     donorName: string,
-    triggerAt: string
+    triggerAt?: string
   ) => {
     if (!toUser) return;
     try {
+      const nowIso = new Date().toISOString();
+      const finalTriggerAt = triggerAt || nowIso;
+
       await addDoc(collection(db, 'notifications'), {
-        toUser,
+        toUser: toUser.trim(),
         fromUser: displayUser,
-        donorId,
-        donorName,
+        donorId: donorId || '',
+        donorName: donorName || '',
         title,
         message,
-        triggerAt,
+        triggerAt: finalTriggerAt,
         read: false,
-        createdAt: new Date().toISOString()
+        pushStatus: 'pending',
+        createdAt: nowIso
       });
 
-      const triggerTime = new Date(triggerAt).getTime();
+      const triggerTime = new Date(finalTriggerAt).getTime();
       const nowTime = Date.now();
 
-      if (triggerTime <= nowTime + 60000) {
-        fetch('/.netlify/functions/check-and-send-push', { 
-          method: 'POST' 
-        }).catch((err) => console.warn('Netlify anında tetiklenemedi:', err));
+      // Bildirim vakti geldiyse veya 1 dakika içindeyse anında Netlify fonksiyonunu uyandır
+      if (isNaN(triggerTime) || triggerTime <= nowTime + 60000) {
+        await triggerPushCheck();
       }
-
     } catch (err) {
       console.error('Bildirim eklenemedi:', err);
     }
@@ -276,24 +304,25 @@ export default function App() {
     }
   }, [user, displayUser]);
 
-  // ARKA PLAN PERİYODİK NETLIFY TETİKLEYİCİSİ (Polling)
+  // ARKA PLAN PERİYODİK NETLIFY TETİKLEYİCİSİ (60 Saniyede Bir + Sekme Odaklandığında)
   useEffect(() => {
-    const triggerPushCheck = async () => {
-      try {
-        const response = await fetch('/.netlify/functions/check-and-send-push', {
-          method: 'POST'
-        });
-        const data = await response.json();
-        console.log("[Push Sync] Periyodik kontrol tetiklendi:", data);
-      } catch (error) {
-        console.error('[Push Sync] Tetikleme hatası:', error);
+    if (!user) return;
+
+    triggerPushCheck();
+    const interval = setInterval(triggerPushCheck, 60000);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        triggerPushCheck();
       }
     };
 
-    triggerPushCheck();
-    const interval = setInterval(triggerPushCheck, 120000);
-    return () => clearInterval(interval);
-  }, []);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [user, triggerPushCheck]);
 
   // CANLI BİLDİRİM LİSTESİ DİNLEYİCİSİ & AÇILIR MODAL TETİKLEYİCİSİ
   useEffect(() => {
@@ -325,6 +354,7 @@ export default function App() {
                 message: data.message || '',
                 triggerAt: data.triggerAt || '',
                 read: Boolean(data.read),
+                pushStatus: data.pushStatus || 'pending',
                 createdAt: data.createdAt || new Date().toISOString()
               });
             }
@@ -532,9 +562,9 @@ export default function App() {
     await handleSaveDonor(updated);
 
     if (assignedMember && assignedMember.toLowerCase() !== displayUser.toLowerCase()) {
-      createNotification(
+      await createNotification(
         assignedMember,
-        'Yeni Dosya Sorumluluğu',
+        'Yeni Dosya Sorumluluğu 📋',
         `${donor.name} isimli bağışçının dosya takibi size atanmıştır.`,
         donor.id,
         donor.name,
@@ -635,10 +665,11 @@ export default function App() {
 
     const currentStep = donor[field] || { date: '', completed: false, completedBy: '' };
     const updatedStep = { ...currentStep, [key]: value };
+    const stepLabel = stepLabels[field] || field;
 
-    let actionMsg = `${field} güncellendi.`;
-    if (key === 'completed') actionMsg = `${field} ${value ? 'tamamlandı olarak işaretlendi.' : 'işareti kaldırıldı.'}`;
-    if (key === 'completedBy') actionMsg = `${field} sorumlusu '${value || "Seçilmedi"}' atandı.`;
+    let actionMsg = `${stepLabel} güncellendi.`;
+    if (key === 'completed') actionMsg = `${stepLabel} ${value ? 'tamamlandı olarak işaretlendi.' : 'işareti kaldırıldı.'}`;
+    if (key === 'completedBy') actionMsg = `${stepLabel} sorumlusu '${value || "Seçilmedi"}' atandı.`;
 
     const updated: Donor = {
       ...donor,
@@ -650,24 +681,46 @@ export default function App() {
     };
     await handleSaveDonor(updated);
 
-    if (field === 'healthCheck' && key === 'completedBy' && value) {
-      const triggerTime = calculateScheduledTrigger(donor.healthCheck?.date || '', 'healthCheck');
-      createNotification(
+    // 1. Sorumlu atandığında bildirim oluştur
+    if (key === 'completedBy' && value && value.toLowerCase() !== displayUser.toLowerCase()) {
+      const triggerTime = field === 'healthCheck' && updatedStep.date
+        ? calculateScheduledTrigger(updatedStep.date, 'healthCheck')
+        : new Date().toISOString();
+
+      await createNotification(
         value,
-        'Sağlık Kontrolü Görevi',
-        `${donor.name} bağışçısının sağlık kontrolü görevi yarın saat 16:00 itibarıyla takibinizdedir.`,
+        `${stepLabel} Görevi 📌`,
+        field === 'healthCheck' && updatedStep.date
+          ? `${donor.name} bağışçısının ${stepLabel} görevi (${updatedStep.date}) takibinizdedir.`
+          : `${donor.name} bağışçısının "${stepLabel}" görevi size atanmıştır.`,
         donor.id,
         donor.name,
         triggerTime
       );
     }
 
-    if (field === 'healthCheck' && key === 'completed' && value === true) {
+    // 2. Sağlık kontrolü tarihi sonradan girildiyse veya değiştirildiyse ve sorumlusu zaten belliyse
+    if (field === 'healthCheck' && key === 'date' && value && updatedStep.completedBy) {
+      if (updatedStep.completedBy.toLowerCase() !== displayUser.toLowerCase()) {
+        const triggerTime = calculateScheduledTrigger(value, 'healthCheck');
+        await createNotification(
+          updatedStep.completedBy,
+          'Sağlık Kontrolü Tarihi Güncellendi 📅',
+          `${donor.name} bağışçısının sağlık kontrolü tarihi ${value} olarak belirlendi.`,
+          donor.id,
+          donor.name,
+          triggerTime
+        );
+      }
+    }
+
+    // 3. Herhangi bir adım tamamlandığında yöneticiye (Burak) anında bildirim gönder
+    if (key === 'completed' && value === true) {
       if (displayUser.toLowerCase() !== 'burak') {
-        createNotification(
+        await createNotification(
           'Burak',
-          'Sağlık Kontrolü Tamamlandı ✅',
-          `${displayUser}, ${donor.name} bağışçısının Sağlık Kontrolünü tamamladı.`,
+          'Görev Tamamlandı ✅',
+          `${displayUser}, ${donor.name} bağışçısının "${stepLabel}" görevini tamamladı.`,
           donor.id,
           donor.name,
           new Date().toISOString()
@@ -819,7 +872,7 @@ export default function App() {
     };
     await handleSaveDonor(updated);
 
-    const dose = donor.vaccineDates[index];
+    const dose = newDoses[index];
     const doseLabel = dose.label || `Doz #${index + 1}`;
     const isEvening = doseLabel.toLowerCase().includes('akşam');
 
@@ -829,10 +882,10 @@ export default function App() {
         isEvening ? 'eveningVaccine' : 'morningVaccine'
       );
 
-      createNotification(
+      await createNotification(
         val,
-        isEvening ? 'Akşam Aşısı Görevi' : 'Sabah Aşısı Görevi',
-        `${donor.name} bağışçısının ${doseLabel} görevi size atanmıştır (${isEvening ? 'Bugün 16:10' : '1 Gün Önce 20:00'} bildirimi).`,
+        isEvening ? 'Akşam Aşısı Görevi 💉' : 'Sabah Aşısı Görevi 💉',
+        `${donor.name} bağışçısının ${doseLabel} (${dose.date}) görevi size atanmıştır.`,
         donor.id,
         donor.name,
         triggerTime
@@ -841,7 +894,7 @@ export default function App() {
 
     if (key === 'completed' && val === true) {
       if (displayUser.toLowerCase() !== 'burak') {
-        createNotification(
+        await createNotification(
           'Burak',
           'Aşı Dozu Tamamlandı ✅',
           `${displayUser}, ${donor.name} bağışçısının ${doseLabel} aşısını tamamladı.`,
