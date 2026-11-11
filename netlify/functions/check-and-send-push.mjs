@@ -21,16 +21,20 @@ if (!getApps().length) {
 const db = getFirestore();
 const messaging = getMessaging();
 
-// Sabit uygulama adresini ortam değişkeninden al (Sonunda tek bir '/' olmasını garantile)
-const getAppUrl = () => {
-  const rawUrl = process.env.APP_URL || process.env.URL || '';
+// Çökme yapmayan güvenli URL bulucu
+const getAppUrl = (req) => {
+  let rawUrl = process.env.APP_URL || process.env.URL || process.env.DEPLOY_PRIME_URL || '';
+  if (!rawUrl && req?.headers) {
+    const host = req.headers.get ? req.headers.get('host') : req.headers.host;
+    if (host) rawUrl = `https://${host}`;
+  }
   if (!rawUrl || !rawUrl.startsWith('https://')) {
-    throw new Error('Geçerli bir https:// APP_URL ortam değişkeni tanımlanmamış!');
+    rawUrl = 'https://kizilay-c3c96.firebaseapp.com';
   }
   return rawUrl.replace(/\/+$/, '') + '/';
 };
 
-// Türkçe karakter uyumlu + Hem Doküman ID hem de 'user'/'userName' alanı üzerinden Token toplayıcı
+// Kullanıcıya ait tüm benzersiz token'ları topla
 async function getUserTokens(toUser) {
   const tokens = new Set();
   const raw = String(toUser).trim();
@@ -47,7 +51,6 @@ async function getUserTokens(toUser) {
   const candidates = Array.from(new Set([raw, lower, trLower, ascii])).filter(Boolean);
   if (candidates.length === 0) return [];
 
-  // 1. Doğrudan doküman ID'si kullanıcı adı olan kayıtlar
   for (const id of candidates) {
     const docSnap = await db.collection('fcm_tokens').doc(id).get();
     if (docSnap.exists) {
@@ -59,38 +62,24 @@ async function getUserTokens(toUser) {
     }
   }
 
-  // 2. Rastgele doküman ID'si ile oluşturulup içinde 'user' alanı bulunan kayıtlar
-  try {
-    const qUserSnap = await db.collection('fcm_tokens').where('user', 'in', candidates).get();
-    qUserSnap.forEach((d) => {
-      const data = d.data();
-      if (data?.token) tokens.add(data.token);
-      if (Array.isArray(data?.tokens)) {
-        data.tokens.forEach((t) => t && tokens.add(t));
-      }
-    });
-  } catch (e) {
-    console.warn('user alanı sorgusu hatası:', e.message);
-  }
-
-  // 3. Alan adı 'userName' olarak kaydedilmiş kayıtlar
-  try {
-    const qUserNameSnap = await db.collection('fcm_tokens').where('userName', 'in', candidates).get();
-    qUserNameSnap.forEach((d) => {
-      const data = d.data();
-      if (data?.token) tokens.add(data.token);
-      if (Array.isArray(data?.tokens)) {
-        data.tokens.forEach((t) => t && tokens.add(t));
-      }
-    });
-  } catch (e) {
-    // Alan yoksa sessizce geç
+  for (const field of ['user', 'userName', 'uid']) {
+    try {
+      const qSnap = await db.collection('fcm_tokens').where(field, 'in', candidates).get();
+      qSnap.forEach((d) => {
+        const data = d.data();
+        if (data?.token) tokens.add(data.token);
+        if (Array.isArray(data?.tokens)) {
+          data.tokens.forEach((t) => t && tokens.add(t));
+        }
+      });
+    } catch (e) {
+      // İlgili alan yoksa geç
+    }
   }
 
   return Array.from(tokens);
 }
 
-// Atomik Durum Geçişi: pending/failed -> sending
 async function markAsSending(docRef, nowTime) {
   try {
     return await db.runTransaction(async (transaction) => {
@@ -124,7 +113,7 @@ export default async (req, context) => {
   try {
     const now = new Date();
     const nowTime = now.getTime();
-    const appUrl = getAppUrl();
+    const appUrl = getAppUrl(req);
 
     const snapshot = await db
       .collection('notifications')
@@ -162,7 +151,7 @@ export default async (req, context) => {
       if (userTokens.length === 0) {
         await docSnap.ref.update({
           pushStatus: 'failed',
-          lastError: 'Kullanıcıya ait FCM token bulunamadı'
+          lastError: `Kullanıcıya (${toUser}) ait FCM token bulunamadı`
         });
         continue;
       }
@@ -172,8 +161,8 @@ export default async (req, context) => {
       const notifId = String(docSnap.id);
       const donorId = String(data.donorId || '');
 
-      let isAcceptedByFCM = false;
-      let lastErrorMsg = '';
+      let successCountForThisNotif = 0;
+      const errorList = [];
 
       for (const fcmToken of userTokens) {
         const message = {
@@ -194,7 +183,9 @@ export default async (req, context) => {
             notification: {
               icon: `${appUrl}favicon.ico`,
               badge: `${appUrl}favicon.ico`,
-              tag: notifId
+              tag: notifId,
+              renotify: true,
+              requireInteraction: true
             },
             fcmOptions: {
               link: appUrl
@@ -204,25 +195,31 @@ export default async (req, context) => {
 
         try {
           await messaging.send(message);
-          isAcceptedByFCM = true;
+          successCountForThisNotif++;
           sentCount++;
         } catch (err) {
-          lastErrorMsg = err.code || err.message || 'FCM Gönderim Hatası';
-          console.error(`FCM Hatası (${toUser}):`, lastErrorMsg);
+          const errCode = err.code || err.message || 'FCM Gönderim Hatası';
+          const shortToken = fcmToken.substring(0, 12) + '...';
+          errorList.push(`${shortToken}: ${errCode}`);
+          console.error(`FCM Hatası (${toUser} - ${shortToken}):`, errCode);
         }
       }
 
-      if (isAcceptedByFCM) {
+      if (successCountForThisNotif > 0) {
         await docSnap.ref.update({
           pushStatus: 'sent',
           sentAt: now.toISOString(),
+          totalTokensFound: userTokens.length,
+          deliveredTokensCount: successCountForThisNotif,
+          partialErrors: errorList.length > 0 ? errorList : null,
           lastError: null
         });
       } else {
         await docSnap.ref.update({
           pushStatus: 'failed',
+          totalTokensFound: userTokens.length,
           retryCount: (data.retryCount || 0) + 1,
-          lastError: lastErrorMsg
+          lastError: errorList.join(' | ')
         });
       }
     }
