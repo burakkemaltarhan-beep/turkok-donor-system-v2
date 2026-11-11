@@ -21,20 +21,9 @@ if (!getApps().length) {
 const db = getFirestore();
 const messaging = getMessaging();
 
-// Çökme yapmayan güvenli URL bulucu
-const getAppUrl = (req) => {
-  let rawUrl = process.env.APP_URL || process.env.URL || process.env.DEPLOY_PRIME_URL || '';
-  if (!rawUrl && req?.headers) {
-    const host = req.headers.get ? req.headers.get('host') : req.headers.host;
-    if (host) rawUrl = `https://${host}`;
-  }
-  if (!rawUrl || !rawUrl.startsWith('https://')) {
-    rawUrl = 'https://kizilay-c3c96.firebaseapp.com';
-  }
-  return rawUrl.replace(/\/+$/, '') + '/';
-};
+const APP_URL = 'https://donortakip.netlify.app/';
 
-// Kullanıcıya ait tüm benzersiz token'ları topla
+// Kullanıcıya ait benzersiz token'ları topla
 async function getUserTokens(toUser) {
   const tokens = new Set();
   const raw = String(toUser).trim();
@@ -51,7 +40,6 @@ async function getUserTokens(toUser) {
   const candidates = Array.from(new Set([raw, lower, trLower, ascii])).filter(Boolean);
   if (candidates.length === 0) return [];
 
-  // 1. Doğrudan doküman ID'si kullanıcı adı olan kayıtlar
   for (const id of candidates) {
     const docSnap = await db.collection('fcm_tokens').doc(id).get();
     if (docSnap.exists) {
@@ -63,7 +51,6 @@ async function getUserTokens(toUser) {
     }
   }
 
-  // 2. Rastgele doküman ID'si ile oluşturulup içinde user / userName / uid alanı bulunan kayıtlar
   for (const field of ['user', 'userName', 'uid']) {
     try {
       const qSnap = await db.collection('fcm_tokens').where(field, 'in', candidates).get();
@@ -75,14 +62,13 @@ async function getUserTokens(toUser) {
         }
       });
     } catch (e) {
-      // İlgili alan yoksa geç
+      // Alan yoksa geç
     }
   }
 
   return Array.from(tokens);
 }
 
-// Atomik Durum Geçişi: pending/failed -> sending
 async function markAsSending(docRef, nowTime) {
   try {
     return await db.runTransaction(async (transaction) => {
@@ -116,7 +102,6 @@ export default async (req, context) => {
   try {
     const now = new Date();
     const nowTime = now.getTime();
-    const appUrl = getAppUrl(req);
 
     const snapshot = await db
       .collection('notifications')
@@ -170,30 +155,36 @@ export default async (req, context) => {
       for (const fcmToken of userTokens) {
         const message = {
           token: fcmToken,
-          // Kök 'notification' objesi kaldırıldı (Çift bildirimi ve Android yutmasını önler)
-          data: {
+          // Ekran kapalıyken Android ve iOS'un uyanması için kök notification ZORUNLUDUR:
+          notification: {
             title,
-            body,
+            body
+          },
+          data: {
             donorId,
             notifId,
-            url: appUrl
+            url: APP_URL
           },
+          // Android Doze Mode (Ekran kapalı derin uyku) kilidini açar:
+          android: {
+            priority: 'high',
+            ttl: 86400000
+          },
+          // WebPush Yüksek Öncelik ve Tekilleştirme (title/body burada tekrar EDİLMEZ):
           webpush: {
             headers: {
               Urgency: 'high',
               TTL: '86400'
             },
             notification: {
-              title,
-              body,
-              icon: `${appUrl}favicon.ico`,
-              badge: `${appUrl}favicon.ico`,
+              icon: `${APP_URL}favicon.ico`,
+              badge: `${APP_URL}favicon.ico`,
               tag: notifId,
               renotify: true,
               requireInteraction: true
             },
             fcmOptions: {
-              link: appUrl
+              link: APP_URL
             }
           }
         };
@@ -230,7 +221,7 @@ export default async (req, context) => {
     }
 
     return new Response(
-      JSON.stringify({ success: true, sent: sentCount, appUrl }),
+      JSON.stringify({ success: true, sent: sentCount, appUrl: APP_URL }),
       { status: 200, headers: { 'Content-Type': 'application/json' } }
     );
   } catch (error) {
