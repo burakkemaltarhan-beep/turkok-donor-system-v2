@@ -6,3 +6,5 @@
   from = "/*"
   to = "/index.html"
   status = 200
+  [functions."check-and-send-push"]
+  schedule = "* * * * *"
