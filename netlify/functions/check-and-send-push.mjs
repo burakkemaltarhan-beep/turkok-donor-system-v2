@@ -51,6 +51,7 @@ async function getUserTokens(toUser) {
   const candidates = Array.from(new Set([raw, lower, trLower, ascii])).filter(Boolean);
   if (candidates.length === 0) return [];
 
+  // 1. Doğrudan doküman ID'si kullanıcı adı olan kayıtlar
   for (const id of candidates) {
     const docSnap = await db.collection('fcm_tokens').doc(id).get();
     if (docSnap.exists) {
@@ -62,6 +63,7 @@ async function getUserTokens(toUser) {
     }
   }
 
+  // 2. Rastgele doküman ID'si ile oluşturulup içinde user / userName / uid alanı bulunan kayıtlar
   for (const field of ['user', 'userName', 'uid']) {
     try {
       const qSnap = await db.collection('fcm_tokens').where(field, 'in', candidates).get();
@@ -80,6 +82,7 @@ async function getUserTokens(toUser) {
   return Array.from(tokens);
 }
 
+// Atomik Durum Geçişi: pending/failed -> sending
 async function markAsSending(docRef, nowTime) {
   try {
     return await db.runTransaction(async (transaction) => {
@@ -167,13 +170,13 @@ export default async (req, context) => {
       for (const fcmToken of userTokens) {
         const message = {
           token: fcmToken,
-          notification: {
-            title,
-            body
-          },
+          // Kök 'notification' objesi kaldırıldı (Çift bildirimi ve Android yutmasını önler)
           data: {
+            title,
+            body,
             donorId,
-            notifId
+            notifId,
+            url: appUrl
           },
           webpush: {
             headers: {
@@ -181,6 +184,8 @@ export default async (req, context) => {
               TTL: '86400'
             },
             notification: {
+              title,
+              body,
               icon: `${appUrl}favicon.ico`,
               badge: `${appUrl}favicon.ico`,
               tag: notifId,
