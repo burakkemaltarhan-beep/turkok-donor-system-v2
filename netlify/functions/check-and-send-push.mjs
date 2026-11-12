@@ -1,5 +1,5 @@
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
+import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 
 if (!getApps().length) {
@@ -21,11 +21,12 @@ if (!getApps().length) {
 const db = getFirestore();
 const messaging = getMessaging();
 
-const APP_URL = 'https://donortakip.netlify.app/';
+const APP_URL = (process.env.APP_URL || 'https://donortakip.netlify.app').replace(/\/+$/, '') + '/';
+const MAX_RETRY_COUNT = 5;
 
-// Kullanıcıya ait benzersiz token'ları topla
+// Kullanıcıya ait benzersiz token'ları ve bulundukları doküman referanslarını topla
 async function getUserTokens(toUser) {
-  const tokens = new Set();
+  const tokenMap = new Map(); // token -> Set<DocumentReference>
   const raw = String(toUser).trim();
   const lower = raw.toLowerCase();
   const trLower = raw.toLocaleLowerCase('tr-TR');
@@ -38,35 +39,77 @@ async function getUserTokens(toUser) {
     .replace(/ğ/g, 'g');
 
   const candidates = Array.from(new Set([raw, lower, trLower, ascii])).filter(Boolean);
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) return { tokens: [], tokenDocMap: tokenMap };
 
+  const addTokenFromDoc = (docSnap) => {
+    const data = docSnap.data();
+    if (!data) return;
+
+    const registerToken = (t) => {
+      if (!t || typeof t !== 'string') return;
+      const cleanToken = t.trim();
+      if (!cleanToken) return;
+      if (!tokenMap.has(cleanToken)) {
+        tokenMap.set(cleanToken, new Set());
+      }
+      tokenMap.get(cleanToken).add(docSnap.ref);
+    };
+
+    if (data.token) registerToken(data.token);
+    if (Array.isArray(data.tokens)) {
+      data.tokens.forEach(registerToken);
+    }
+  };
+
+  // 1. Doğrudan doküman ID'si üzerinden kontrol
   for (const id of candidates) {
     const docSnap = await db.collection('fcm_tokens').doc(id).get();
     if (docSnap.exists) {
-      const data = docSnap.data();
-      if (data?.token) tokens.add(data.token);
-      if (Array.isArray(data?.tokens)) {
-        data.tokens.forEach((t) => t && tokens.add(t));
-      }
+      addTokenFromDoc(docSnap);
     }
   }
 
+  // 2. Alan bazlı sorgular (user, userName, uid)
   for (const field of ['user', 'userName', 'uid']) {
     try {
       const qSnap = await db.collection('fcm_tokens').where(field, 'in', candidates).get();
-      qSnap.forEach((d) => {
-        const data = d.data();
-        if (data?.token) tokens.add(data.token);
-        if (Array.isArray(data?.tokens)) {
-          data.tokens.forEach((t) => t && tokens.add(t));
-        }
-      });
+      qSnap.forEach((d) => addTokenFromDoc(d));
     } catch (e) {
-      // Alan yoksa geç
+      // Alan yoksa sessizce geç
     }
   }
 
-  return Array.from(tokens);
+  return {
+    tokens: Array.from(tokenMap.keys()),
+    tokenDocMap: tokenMap
+  };
+}
+
+// Artık geçersiz olan (silinmiş/süresi dolmuş) FCM token'larını veritabanından otomatik temizle
+async function cleanupInvalidToken(deadToken, docRefs) {
+  if (!docRefs) return;
+  for (const ref of docRefs) {
+    try {
+      const snap = await ref.get();
+      if (!snap.exists) continue;
+      const data = snap.data();
+
+      const updates = {};
+      if (data?.token === deadToken) {
+        updates.token = FieldValue.delete();
+      }
+      if (Array.isArray(data?.tokens) && data.tokens.includes(deadToken)) {
+        updates.tokens = FieldValue.arrayRemove(deadToken);
+      }
+
+      if (Object.keys(updates).length > 0) {
+        await ref.update(updates);
+        console.log(`Geçersiz token temizlendi (${ref.id}): ${deadToken.substring(0, 12)}...`);
+      }
+    } catch (e) {
+      console.warn(`Geçersiz token silinemedi (${ref.id}):`, e.message);
+    }
+  }
 }
 
 async function markAsSending(docRef, nowTime) {
@@ -77,8 +120,9 @@ async function markAsSending(docRef, nowTime) {
 
       const data = freshDoc.data();
       const status = data.pushStatus || 'pending';
+      const retries = data.retryCount || 0;
 
-      if (data.read === true || status === 'sent') {
+      if (data.read === true || status === 'sent' || retries >= MAX_RETRY_COUNT) {
         return null;
       }
 
@@ -121,6 +165,7 @@ export default async (req, context) => {
       const initialData = docSnap.data();
 
       if (initialData.pushStatus === 'sent') continue;
+      if ((initialData.retryCount || 0) >= MAX_RETRY_COUNT) continue;
 
       const triggerTime = initialData?.triggerAt ? new Date(initialData.triggerAt).getTime() : 0;
       if (triggerTime > nowTime + 60000) continue;
@@ -134,12 +179,13 @@ export default async (req, context) => {
         continue;
       }
 
-      const userTokens = await getUserTokens(toUser);
+      const { tokens: userTokens, tokenDocMap } = await getUserTokens(toUser);
 
       if (userTokens.length === 0) {
         await docSnap.ref.update({
           pushStatus: 'failed',
-          lastError: `Kullanıcıya (${toUser}) ait FCM token bulunamadı`
+          retryCount: (data.retryCount || 0) + 1,
+          lastError: `Kullanıcıya (${toUser}) ait aktif FCM token bulunamadı`
         });
         continue;
       }
@@ -155,7 +201,6 @@ export default async (req, context) => {
       for (const fcmToken of userTokens) {
         const message = {
           token: fcmToken,
-          // Ekran kapalıyken Android ve iOS'un uyanması için kök notification ZORUNLUDUR:
           notification: {
             title,
             body
@@ -165,12 +210,10 @@ export default async (req, context) => {
             notifId,
             url: APP_URL
           },
-          // Android Doze Mode (Ekran kapalı derin uyku) kilidini açar:
           android: {
             priority: 'high',
             ttl: 86400000
           },
-          // WebPush Yüksek Öncelik ve Tekilleştirme (title/body burada tekrar EDİLMEZ):
           webpush: {
             headers: {
               Urgency: 'high',
@@ -181,7 +224,8 @@ export default async (req, context) => {
               badge: `${APP_URL}favicon.ico`,
               tag: notifId,
               renotify: true,
-              requireInteraction: true
+              requireInteraction: true,
+              vibrate: [200, 100, 200]
             },
             fcmOptions: {
               link: APP_URL
@@ -198,6 +242,15 @@ export default async (req, context) => {
           const shortToken = fcmToken.substring(0, 12) + '...';
           errorList.push(`${shortToken}: ${errCode}`);
           console.error(`FCM Hatası (${toUser} - ${shortToken}):`, errCode);
+
+          // Eğer token geçersizse veya cihazdan silindiyse otomatik olarak veritabanından temizle
+          if (
+            errCode.includes('registration-token-not-registered') ||
+            errCode.includes('invalid-registration-token') ||
+            errCode.includes('invalid-argument')
+          ) {
+            await cleanupInvalidToken(fcmToken, tokenDocMap.get(fcmToken));
+          }
         }
       }
 
