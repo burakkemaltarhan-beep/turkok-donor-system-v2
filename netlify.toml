@@ -7,3 +7,5 @@
 
 [[functions."check-and-send-push"]]
   schedule = "*/5 * * * *"
+  [functions."check-and-send-push"]
+  schedule = "* * * * *"
