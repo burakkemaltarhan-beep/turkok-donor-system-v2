@@ -130,7 +130,6 @@ export default function App() {
   const [donors, setDonors] = useState<Donor[]>([]);
   const [currentTab, setCurrentTab] = useState<'operation' | 'this-week' | 'next-week' | 'reporting'>('operation');
   
-  // Ortak Liste ve Bana Atananlar Görünüm Modu State'i
   const [taskViewMode, setTaskViewMode] = useState<'all' | 'mine'>('all');
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -896,7 +895,10 @@ export default function App() {
     )
   ).sort().reverse();
 
-  // Gelişmiş Filtreleme (Ana Dosya Sorumlusu + Alt Adım Görevlileri + Aşı Sorumluları Dahil)
+  // Bugünün tarihi (YYYY-MM-DD)
+  const todayStr = formatLocalDate(new Date());
+
+  // Gelişmiş Filtreleme (Bana Atananlar sekmesinde sadece bugün ve gelecek tarihler görünür)
   const filteredDonors = donors.filter((d) => {
     const nameMatch = d.name?.toLowerCase().includes(searchTerm.toLowerCase().trim());
     const donorYear = d.healthCheck?.date ? d.healthCheck.date.split('-')[0] : '';
@@ -904,18 +906,23 @@ export default function App() {
     
     // Görünüm Modu Filtresi (Ortak Liste vs Bana Atananlar)
     const viewMatch = taskViewMode === 'all' || (() => {
-      // 1. Ana dosya sorumlusu kendisiyse
+      const isPendingFutureOrToday = (step?: StepDetail | VaccineDose) => {
+        if (!step || !step.date || step.completed) return false;
+        return step.date >= todayStr;
+      };
+
+      // 1. Ana dosya sorumlusuysa
       if (d.assignedTo === displayUser) return true;
 
-      // 2. Alt adımlardan herhangi birinde sorumluysa
-      if (d.healthCheck?.completedBy === displayUser) return true;
-      if (d.publicHealth?.completedBy === displayUser) return true;
-      if (d.transplantTube?.completedBy === displayUser) return true;
-      if (d.idm?.completedBy === displayUser) return true;
-      if (d.postTransplantCheck?.completedBy === displayUser) return true;
+      // 2. Alt adımlardan herhangi birinde sorumluysa VE tarihi bugün/gelecekse (ve tamamlanmamışsa)
+      if (d.healthCheck?.completedBy === displayUser && isPendingFutureOrToday(d.healthCheck)) return true;
+      if (d.publicHealth?.completedBy === displayUser && isPendingFutureOrToday(d.publicHealth)) return true;
+      if (d.transplantTube?.completedBy === displayUser && isPendingFutureOrToday(d.transplantTube)) return true;
+      if (d.idm?.completedBy === displayUser && isPendingFutureOrToday(d.idm)) return true;
+      if (d.postTransplantCheck?.completedBy === displayUser && isPendingFutureOrToday(d.postTransplantCheck)) return true;
 
-      // 3. 10 Doz aşı takviminden herhangi bir dozda sorumluysa
-      if (d.vaccineDates && d.vaccineDates.some(v => v.completedBy === displayUser)) return true;
+      // 3. 10 Doz aşı takviminden herhangi bir dozda sorumluysa VE tarihi bugün/gelecekse
+      if (d.vaccineDates && d.vaccineDates.some(v => v.completedBy === displayUser && isPendingFutureOrToday(v))) return true;
 
       return false;
     })();
@@ -1329,13 +1336,17 @@ export default function App() {
               >
                 <span>👤</span>
                 <span>Bana Atananlar ({donors.filter(d => {
+                  const isPendingFutureOrToday = (step?: StepDetail | VaccineDose) => {
+                    if (!step || !step.date || step.completed) return false;
+                    return step.date >= todayStr;
+                  };
                   if (d.assignedTo === displayUser) return true;
-                  if (d.healthCheck?.completedBy === displayUser) return true;
-                  if (d.publicHealth?.completedBy === displayUser) return true;
-                  if (d.transplantTube?.completedBy === displayUser) return true;
-                  if (d.idm?.completedBy === displayUser) return true;
-                  if (d.postTransplantCheck?.completedBy === displayUser) return true;
-                  if (d.vaccineDates && d.vaccineDates.some(v => v.completedBy === displayUser)) return true;
+                  if (d.healthCheck?.completedBy === displayUser && isPendingFutureOrToday(d.healthCheck)) return true;
+                  if (d.publicHealth?.completedBy === displayUser && isPendingFutureOrToday(d.publicHealth)) return true;
+                  if (d.transplantTube?.completedBy === displayUser && isPendingFutureOrToday(d.transplantTube)) return true;
+                  if (d.idm?.completedBy === displayUser && isPendingFutureOrToday(d.idm)) return true;
+                  if (d.postTransplantCheck?.completedBy === displayUser && isPendingFutureOrToday(d.postTransplantCheck)) return true;
+                  if (d.vaccineDates && d.vaccineDates.some(v => v.completedBy === displayUser && isPendingFutureOrToday(v))) return true;
                   return false;
                 }).length})</span>
               </button>
@@ -1412,7 +1423,7 @@ export default function App() {
               {filteredDonors.length === 0 ? (
                 <div className="bg-white p-8 rounded-2xl text-center text-xs text-slate-400 border border-slate-200">
                   {taskViewMode === 'mine' 
-                    ? `(${displayUser}) üzerine atanmış aktif bir süreç veya alt görev bulunmuyor.` 
+                    ? `(${displayUser}) üzerine atanmış bugün veya gelecek tarihli aktif bir iş bulunmuyor.` 
                     : 'Filtrelere uygun bağışçı kaydı bulunamadı.'}
                 </div>
               ) : (
