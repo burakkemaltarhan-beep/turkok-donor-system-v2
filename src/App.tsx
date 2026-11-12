@@ -1,7 +1,18 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { onAuthStateChanged, signOut, signInWithEmailAndPassword } from 'firebase/auth';
 import type { User } from 'firebase/auth';
-import { collection, onSnapshot, query, orderBy, doc, setDoc, deleteDoc, addDoc, where } from 'firebase/firestore';
+import {
+  collection,
+  onSnapshot,
+  query,
+  orderBy,
+  doc,
+  setDoc,
+  deleteDoc,
+  addDoc,
+  where,
+  writeBatch
+} from 'firebase/firestore';
 import { auth, db } from './config/firebase';
 import { requestAndSaveFCMToken } from './utils/fcm';
 import OperationalTasks from './components/OperationalTasks';
@@ -82,6 +93,14 @@ const stepLabels: Record<'healthCheck' | 'publicHealth' | 'transplantTube' | 'id
   postTransplantCheck: 'Nakil Sonrası Sağlık'
 };
 
+// UTC kaymasını önleyen yerel YYYY-MM-DD tarih formatlayıcı
+const formatLocalDate = (dateObj: Date): string => {
+  const year = dateObj.getFullYear();
+  const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const day = String(dateObj.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
 export const getDonorSortKey = (d: Donor) => {
   if (!d.healthCheck?.date) return '9999-12';
   const clean = String(d.healthCheck.date).trim();
@@ -101,48 +120,6 @@ export const getDonorSortKey = (d: Donor) => {
   return '9999-12';
 };
 
-const calculateScheduledTrigger = (dateStr: string, type: 'healthCheck' | 'eveningVaccine' | 'morningVaccine') => {
-  if (!dateStr) return new Date().toISOString();
-  const clean = String(dateStr).trim();
-  let year = 0, month = 0, day = 0;
-
-  if (/^\d{4}-\d{2}-\d{2}/.test(clean)) {
-    const parts = clean.slice(0, 10).split('-').map(Number);
-    year = parts[0];
-    month = parts[1] - 1;
-    day = parts[2];
-  } else {
-    const parts = clean.split(/[./-]/).map(Number);
-    if (parts.length === 3) {
-      if (String(parts[2]).length === 4) {
-        year = parts[2];
-        month = parts[1] - 1;
-        day = parts[0];
-      } else {
-        year = parts[0];
-        month = parts[1] - 1;
-        day = parts[2];
-      }
-    }
-  }
-
-  if (!year) return new Date().toISOString();
-
-  const targetDate = new Date(year, month, day, 0, 0, 0);
-
-  if (type === 'healthCheck') {
-    targetDate.setDate(targetDate.getDate() - 1);
-    targetDate.setHours(16, 0, 0, 0);
-  } else if (type === 'eveningVaccine') {
-    targetDate.setHours(16, 10, 0, 0);
-  } else if (type === 'morningVaccine') {
-    targetDate.setDate(targetDate.getDate() - 1);
-    targetDate.setHours(20, 0, 0, 0);
-  }
-
-  return targetDate.toISOString();
-};
-
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -155,13 +132,19 @@ export default function App() {
   const [currentTab, setCurrentTab] = useState<'operation' | 'this-week' | 'next-week' | 'reporting'>('operation');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedYear, setSelectedYear] = useState<string>('all');
+
+  // Kart ve Ay açık/kapalı durumları diğer kullanıcıların ekranını bozmamak için yerel state'te tutulur
   const [monthAccordionState, setMonthAccordionState] = useState<Record<string, boolean>>({});
+  const [openDonorIds, setOpenDonorIds] = useState<Record<string, boolean>>({});
+  const [openAuditLogIds, setOpenAuditLogIds] = useState<Record<string, boolean>>({});
+
+  // Not alanları için kontrollü state yapısı
+  const [statusNotesDraft, setStatusNotesDraft] = useState<Record<string, string>>({});
+  const [idmNotesDraft, setIdmNotesDraft] = useState<Record<string, string>>({});
 
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [showNotifMenu, setShowNotifMenu] = useState(false);
-  const [activeModalNotification, setActiveModalNotification] = useState<NotificationItem | null>(null);
 
-  const [openAuditLogIds, setOpenAuditLogIds] = useState<Record<string, boolean>>({});
   const [savedStatusNoteId, setSavedStatusNoteId] = useState<string | null>(null);
   const [savedIdmNoteId, setSavedIdmNoteId] = useState<string | null>(null);
 
@@ -171,20 +154,31 @@ export default function App() {
   const [activeVaccineDonorId, setActiveVaccineDonorId] = useState<string | null>(null);
   const [collectionDateInput, setCollectionDateInput] = useState<string>('');
 
+  const lastPushTriggerRef = useRef<number>(0);
+
   const getDisplayName = (email?: string | null) => {
     if (!email) return 'Koordinatör';
     const prefix = email.split('@')[0].toLowerCase();
     if (prefix === 'ozkan') return 'Özkan';
     if (prefix === 'yigit') return 'Yiğit';
     if (prefix === 'behlul') return 'Behlül';
+    if (prefix === 'burak') return 'Burak';
+    if (prefix === 'batuhan') return 'Batuhan';
+    if (prefix === 'yunus') return 'Yunus';
     return prefix.charAt(0).toUpperCase() + prefix.slice(1);
   };
 
   const displayUser = getDisplayName(user?.email);
   const isManager = displayUser.toLowerCase() === 'burak';
 
-  // Merkezi Netlify Push Fonksiyonu Tetikleyicisi
-  const triggerPushCheck = useCallback(async () => {
+  // Merkezi Netlify Push Fonksiyonu Tetikleyicisi (3 saniye Debounce korumalı)
+  const triggerPushCheck = useCallback(async (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastPushTriggerRef.current < 3000) {
+      return;
+    }
+    lastPushTriggerRef.current = now;
+
     try {
       const response = await fetch('/.netlify/functions/check-and-send-push', {
         method: 'POST',
@@ -202,27 +196,25 @@ export default function App() {
 
   const handleSaveDonor = async (updatedDonor: Donor) => {
     try {
-      const { id, ...dataToSave } = updatedDonor;
+      const { id, isOpen, ...dataToSave } = updatedDonor;
       await setDoc(doc(db, 'donors', id), dataToSave, { merge: true });
     } catch (err) {
       console.error('Kayıt kaydedilemedi:', err);
     }
   };
 
-  const saveMonthStateToFirebase = async (newStates: Record<string, boolean>) => {
-    try {
-      await setDoc(doc(db, 'donors', '--month-states--'), newStates, { merge: true });
-    } catch (err) {
-      console.error('Ay durumu kaydedilemedi:', err);
-    }
+  const toggleMonthAccordion = (sortKey: string) => {
+    setMonthAccordionState((prev) => ({
+      ...prev,
+      [sortKey]: prev[sortKey] === undefined ? false : !prev[sortKey]
+    }));
   };
 
-  const toggleMonthAccordion = (sortKey: string) => {
-    setMonthAccordionState((prev) => {
-      const updated = { ...prev, [sortKey]: prev[sortKey] === undefined ? false : !prev[sortKey] };
-      saveMonthStateToFirebase(updated);
-      return updated;
-    });
+  const toggleDonorOpen = (id: string) => {
+    setOpenDonorIds((prev) => ({
+      ...prev,
+      [id]: prev[id] === undefined ? false : !prev[id]
+    }));
   };
 
   const toggleAuditLog = (donorId: string) => {
@@ -232,20 +224,22 @@ export default function App() {
     }));
   };
 
+  // Mükerrer bildirim oluşmasını önleyen (deterministicId destekli) bildirim fonksiyonu
   const createNotification = async (
     toUser: string,
     title: string,
     message: string,
     donorId: string,
     donorName: string,
-    triggerAt?: string
+    triggerAt?: string,
+    deterministicKey?: string
   ) => {
     if (!toUser) return;
     try {
       const nowIso = new Date().toISOString();
       const finalTriggerAt = triggerAt || nowIso;
 
-      await addDoc(collection(db, 'notifications'), {
+      const payload = {
         toUser: toUser.trim(),
         fromUser: displayUser,
         donorId: donorId || '',
@@ -256,15 +250,16 @@ export default function App() {
         read: false,
         pushStatus: 'pending',
         createdAt: nowIso
-      });
+      };
 
-      const triggerTime = new Date(finalTriggerAt).getTime();
-      const nowTime = Date.now();
-
-      // Bildirim vakti geldiyse veya 1 dakika içindeyse anında Netlify fonksiyonunu uyandır
-      if (isNaN(triggerTime) || triggerTime <= nowTime + 60000) {
-        await triggerPushCheck();
+      if (deterministicKey) {
+        const safeId = deterministicKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+        await setDoc(doc(db, 'notifications', safeId), payload);
+      } else {
+        await addDoc(collection(db, 'notifications'), payload);
       }
+
+      await triggerPushCheck(true);
     } catch (err) {
       console.error('Bildirim eklenemedi:', err);
     }
@@ -278,10 +273,19 @@ export default function App() {
     }
   };
 
+  // Tüm bildirimleri tek seferde (Batch ile) okundu olarak işaretle
   const markAllNotificationsAsRead = async () => {
-    const unread = notifications.filter(n => !n.read);
-    for (const notif of unread) {
-      markNotificationAsRead(notif.id);
+    const unread = notifications.filter((n) => !n.read);
+    if (unread.length === 0) return;
+
+    try {
+      const batch = writeBatch(db);
+      unread.forEach((notif) => {
+        batch.update(doc(db, 'notifications', notif.id), { read: true });
+      });
+      await batch.commit();
+    } catch (err) {
+      console.error('Toplu okundu yapılamadı:', err);
     }
   };
 
@@ -304,16 +308,16 @@ export default function App() {
     }
   }, [user, displayUser]);
 
-  // ARKA PLAN PERİYODİK NETLIFY TETİKLEYİCİSİ (60 Saniyede Bir + Sekme Odaklandığında)
+  // ARKA PLAN PERİYODİK NETLIFY TETİKLEYİCİSİ
   useEffect(() => {
     if (!user) return;
 
-    triggerPushCheck();
-    const interval = setInterval(triggerPushCheck, 60000);
+    triggerPushCheck(true);
+    const interval = setInterval(() => triggerPushCheck(false), 90000);
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        triggerPushCheck();
+        triggerPushCheck(false);
       }
     };
 
@@ -324,64 +328,51 @@ export default function App() {
     };
   }, [user, triggerPushCheck]);
 
-  // CANLI BİLDİRİM LİSTESİ DİNLEYİCİSİ & AÇILIR MODAL TETİKLEYİCİSİ
+  // CANLI BİLDİRİM LİSTESİ DİNLEYİCİSİ (Zil Menüsü İçin)
   useEffect(() => {
     if (!user || !displayUser) return;
 
-    try {
-      const notifQuery = query(
-        collection(db, 'notifications'),
-        where('toUser', '==', displayUser)
-      );
+    const notifQuery = query(
+      collection(db, 'notifications'),
+      where('toUser', '==', displayUser)
+    );
 
-      const unsubscribe = onSnapshot(
-        notifQuery,
-        (snapshot) => {
-          const list: NotificationItem[] = [];
-          const nowTime = new Date().getTime();
+    const unsubscribe = onSnapshot(
+      notifQuery,
+      (snapshot) => {
+        const list: NotificationItem[] = [];
 
-          snapshot.forEach((d) => {
-            const data = d.data() as any;
-            const triggerTime = data?.triggerAt ? new Date(data.triggerAt).getTime() : 0;
-            if (isNaN(triggerTime) || triggerTime <= nowTime) {
-              list.push({
-                id: d.id,
-                toUser: data.toUser || '',
-                fromUser: data.fromUser || '',
-                donorId: data.donorId || '',
-                donorName: data.donorName || '',
-                title: data.title || 'Bildirim',
-                message: data.message || '',
-                triggerAt: data.triggerAt || '',
-                read: Boolean(data.read),
-                pushStatus: data.pushStatus || 'pending',
-                createdAt: data.createdAt || new Date().toISOString()
-              });
-            }
+        snapshot.forEach((d) => {
+          const data = d.data() as any;
+          list.push({
+            id: d.id,
+            toUser: data.toUser || '',
+            fromUser: data.fromUser || '',
+            donorId: data.donorId || '',
+            donorName: data.donorName || '',
+            title: data.title || 'Bildirim',
+            message: data.message || '',
+            triggerAt: data.triggerAt || '',
+            read: Boolean(data.read),
+            pushStatus: data.pushStatus || 'pending',
+            createdAt: data.createdAt || new Date().toISOString()
           });
+        });
 
-          list.sort((a, b) => {
-            const timeA = new Date(a.createdAt).getTime() || 0;
-            const timeB = new Date(b.createdAt).getTime() || 0;
-            return timeB - timeA;
-          });
+        list.sort((a, b) => {
+          const timeA = new Date(a.createdAt).getTime() || 0;
+          const timeB = new Date(b.createdAt).getTime() || 0;
+          return timeB - timeA;
+        });
 
-          const latestUnread = list.find(n => !n.read);
-          if (latestUnread) {
-            setActiveModalNotification(latestUnread);
-          }
+        setNotifications(list);
+      },
+      (err) => {
+        console.error('Bildirim dinleme hatası:', err);
+      }
+    );
 
-          setNotifications(list);
-        },
-        (err) => {
-          console.warn('Bildirim dinleme hatası:', err);
-        }
-      );
-
-      return () => unsubscribe();
-    } catch (e) {
-      console.warn('Bildirim sorgusu başlatılamadı:', e);
-    }
+    return () => unsubscribe();
   }, [user, displayUser]);
 
   useEffect(() => {
@@ -393,11 +384,7 @@ export default function App() {
       (snapshot) => {
         const donorList: Donor[] = [];
         snapshot.forEach((docSnapshot) => {
-          if (docSnapshot.id === '--month-states--') {
-            const states = (docSnapshot.data() || {}) as Record<string, boolean>;
-            setMonthAccordionState(states);
-            return;
-          }
+          if (docSnapshot.id === '--month-states--') return;
 
           const data = docSnapshot.data() as any;
           donorList.push({
@@ -408,7 +395,6 @@ export default function App() {
             assignedTo: data.assignedTo || '',
             status: data.status || 'Aktif',
             statusNote: data.statusNote || '',
-            isOpen: data.isOpen ?? true,
             healthCheck: data.healthCheck || { date: '', completed: false, completedBy: '' },
             publicHealth: data.publicHealth || { date: '', completed: false, completedBy: '' },
             transplantTube: data.transplantTube || { date: '', completed: false, completedBy: '' },
@@ -447,12 +433,16 @@ export default function App() {
     try {
       await signInWithEmailAndPassword(auth, selectedUserEmail, passwordInput);
     } catch (err: any) {
-      try {
-        const prefix = selectedUserEmail.split('@')[0];
-        const altEmail = `${prefix}@kizilay.org.tr`;
-        await signInWithEmailAndPassword(auth, altEmail, passwordInput);
-      } catch (err2) {
-        setLoginError('Şifre hatalı veya giriş izniniz yok!');
+      if (err?.code === 'auth/user-not-found' || err?.code === 'auth/invalid-credential') {
+        try {
+          const prefix = selectedUserEmail.split('@')[0];
+          const altEmail = `${prefix}@kizilay.org.tr`;
+          await signInWithEmailAndPassword(auth, altEmail, passwordInput);
+        } catch {
+          setLoginError('Şifre hatalı veya giriş izniniz yok!');
+        }
+      } else {
+        setLoginError('Giriş yapılamadı. Lütfen bilgilerinizi kontrol edin.');
       }
     } finally {
       setIsLoggingIn(false);
@@ -472,15 +462,8 @@ export default function App() {
     if (!donor) return;
 
     const sortKey = getDonorSortKey(donor);
-    setMonthAccordionState((prev) => {
-      const updated = { ...prev, [sortKey]: true };
-      saveMonthStateToFirebase(updated);
-      return updated;
-    });
-
-    setDonors((prev) =>
-      prev.map((d) => (d.id === donorId ? { ...d, isOpen: true } : d))
-    );
+    setMonthAccordionState((prev) => ({ ...prev, [sortKey]: true }));
+    setOpenDonorIds((prev) => ({ ...prev, [donorId]: true }));
 
     let attempts = 0;
     const interval = setInterval(() => {
@@ -514,7 +497,6 @@ export default function App() {
       assignedTo: '',
       status: 'Aktif',
       statusNote: '',
-      isOpen: true,
       healthCheck: { date: '', completed: false, completedBy: '' },
       publicHealth: { date: '', completed: false, completedBy: '' },
       transplantTube: { date: '', completed: false, completedBy: '' },
@@ -532,6 +514,7 @@ export default function App() {
     };
 
     await handleSaveDonor(newDonor);
+    setOpenDonorIds((prev) => ({ ...prev, [newId]: true }));
     setNewDonorName('');
     setNewDonorHospital('');
   };
@@ -561,26 +544,25 @@ export default function App() {
     };
     await handleSaveDonor(updated);
 
-    if (assignedMember && assignedMember.toLowerCase() !== displayUser.toLowerCase()) {
+    if (assignedMember) {
       await createNotification(
         assignedMember,
         'Yeni Dosya Sorumluluğu 📋',
         `${donor.name} isimli bağışçının dosya takibi size atanmıştır.`,
         donor.id,
         donor.name,
-        new Date().toISOString()
+        new Date().toISOString(),
+        `assign_${donor.id}`
       );
     }
   };
 
-  const toggleDonorOpen = (id: string) => {
-    const donor = donors.find((d) => d.id === id);
-    if (!donor) return;
-    const updated = { ...donor, isOpen: !donor.isOpen };
-    handleSaveDonor(updated);
-  };
-
   const handleDeleteDonor = async (donor: Donor) => {
+    if (!isManager) {
+      alert('Bağışçı kaydını silme yetkisi sadece Burak kullanıcısına aittir.');
+      return;
+    }
+
     const onay = confirm(`"${donor.name}" kaydını kalıcı olarak silmek istediğinize emin misiniz?`);
     if (!onay) return;
 
@@ -593,7 +575,7 @@ export default function App() {
 
   const handleNameChange = (id: string, newName: string) => {
     const donor = donors.find((d) => d.id === id);
-    if (!donor || !newName.trim()) return;
+    if (!donor || !newName.trim() || donor.name === newName.trim()) return;
     const updated: Donor = {
       ...donor,
       name: newName.trim(),
@@ -681,51 +663,43 @@ export default function App() {
     };
     await handleSaveDonor(updated);
 
-    // 1. Sorumlu atandığında bildirim oluştur
-    if (key === 'completedBy' && value && value.toLowerCase() !== displayUser.toLowerCase()) {
-      const triggerTime = field === 'healthCheck' && updatedStep.date
-        ? calculateScheduledTrigger(updatedStep.date, 'healthCheck')
-        : new Date().toISOString();
-
+    // 1. Sorumlu atandığında ANINDA bildirim oluştur (Mükerrer önleyici anahtar ile)
+    if (key === 'completedBy' && value) {
       await createNotification(
         value,
         `${stepLabel} Görevi 📌`,
-        field === 'healthCheck' && updatedStep.date
-          ? `${donor.name} bağışçısının ${stepLabel} görevi (${updatedStep.date}) takibinizdedir.`
-          : `${donor.name} bağışçısının "${stepLabel}" görevi size atanmıştır.`,
+        `${donor.name} bağışçısının "${stepLabel}" görevi ${updatedStep.date ? `(${updatedStep.date}) ` : ''}size atanmıştır.`,
         donor.id,
         donor.name,
-        triggerTime
+        new Date().toISOString(),
+        `step_assign_${donor.id}_${field}`
       );
     }
 
-    // 2. Sağlık kontrolü tarihi sonradan girildiyse veya değiştirildiyse ve sorumlusu zaten belliyse
-    if (field === 'healthCheck' && key === 'date' && value && updatedStep.completedBy) {
-      if (updatedStep.completedBy.toLowerCase() !== displayUser.toLowerCase()) {
-        const triggerTime = calculateScheduledTrigger(value, 'healthCheck');
-        await createNotification(
-          updatedStep.completedBy,
-          'Sağlık Kontrolü Tarihi Güncellendi 📅',
-          `${donor.name} bağışçısının sağlık kontrolü tarihi ${value} olarak belirlendi.`,
-          donor.id,
-          donor.name,
-          triggerTime
-        );
-      }
+    // 2. Tarih değiştirildiyse ve sorumlusu zaten belliyse güncel tarih bildirimi gönder
+    if (key === 'date' && value && updatedStep.completedBy) {
+      await createNotification(
+        updatedStep.completedBy,
+        `${stepLabel} Tarihi Güncellendi 📅`,
+        `${donor.name} bağışçısının "${stepLabel}" tarihi ${value} olarak belirlendi.`,
+        donor.id,
+        donor.name,
+        new Date().toISOString(),
+        `step_date_${donor.id}_${field}`
+      );
     }
 
-    // 3. Herhangi bir adım tamamlandığında yöneticiye (Burak) anında bildirim gönder
+    // 3. Görev tamamlandığında yöneticiye (Burak) anında bildirim gönder
     if (key === 'completed' && value === true) {
-      if (displayUser.toLowerCase() !== 'burak') {
-        await createNotification(
-          'Burak',
-          'Görev Tamamlandı ✅',
-          `${displayUser}, ${donor.name} bağışçısının "${stepLabel}" görevini tamamladı.`,
-          donor.id,
-          donor.name,
-          new Date().toISOString()
-        );
-      }
+      await createNotification(
+        'Burak',
+        'Görev Tamamlandı ✅',
+        `${displayUser}, ${donor.name} bağışçısının "${stepLabel}" görevini tamamladı.`,
+        donor.id,
+        donor.name,
+        new Date().toISOString(),
+        `step_done_${donor.id}_${field}`
+      );
     }
   };
 
@@ -800,7 +774,14 @@ export default function App() {
     const donor = donors.find((d) => d.id === donorId);
     if (!donor) return;
 
-    const colDateObj = new Date(collectionDateInput);
+    const parts = collectionDateInput.split('-').map(Number);
+    if (parts.length !== 3) {
+      alert('Geçersiz tarih formatı.');
+      return;
+    }
+
+    // Yerel saat dilimine göre güvenli tarih oluşturma (UTC kaymasını engeller)
+    const colDateObj = new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0);
     if (isNaN(colDateObj.getTime())) {
       alert('Geçersiz tarih formatı.');
       return;
@@ -808,7 +789,7 @@ export default function App() {
 
     const startDateObj = new Date(colDateObj);
     startDateObj.setDate(colDateObj.getDate() - 5);
-    const d1Str = startDateObj.toISOString().split('T')[0];
+    const d1Str = formatLocalDate(startDateObj);
 
     const generatedDoses: VaccineDose[] = [
       { label: "1. Doz (1. Gün Akşam)", date: d1Str, completed: false, completedBy: "" }
@@ -817,7 +798,7 @@ export default function App() {
     for (let i = 1; i <= 4; i++) {
       const currentDay = new Date(startDateObj);
       currentDay.setDate(startDateObj.getDate() + i);
-      const dayStr = currentDay.toISOString().split('T')[0];
+      const dayStr = formatLocalDate(currentDay);
       generatedDoses.push({ label: `${i + 1}. Gün Sabah Dozu`, date: dayStr, completed: false, completedBy: "" });
       generatedDoses.push({ label: `${i + 1}. Gün Akşam Dozu`, date: dayStr, completed: false, completedBy: "" });
     }
@@ -826,7 +807,7 @@ export default function App() {
 
     const postDate = new Date(colDateObj);
     postDate.setDate(colDateObj.getDate() + 20);
-    const postDateStr = postDate.toISOString().split('T')[0];
+    const postDateStr = formatLocalDate(postDate);
 
     const updated: Donor = {
       ...donor,
@@ -877,32 +858,27 @@ export default function App() {
     const isEvening = doseLabel.toLowerCase().includes('akşam');
 
     if (key === 'completedBy' && val) {
-      const triggerTime = calculateScheduledTrigger(
-        dose.date,
-        isEvening ? 'eveningVaccine' : 'morningVaccine'
-      );
-
       await createNotification(
         val,
         isEvening ? 'Akşam Aşısı Görevi 💉' : 'Sabah Aşısı Görevi 💉',
-        `${donor.name} bağışçısının ${doseLabel} (${dose.date}) görevi size atanmıştır.`,
+        `${donor.name} bağışçısının ${doseLabel} (${dose.date || 'Tarihsiz'}) görevi size atanmıştır.`,
         donor.id,
         donor.name,
-        triggerTime
+        new Date().toISOString(),
+        `vac_assign_${donor.id}_${index}`
       );
     }
 
     if (key === 'completed' && val === true) {
-      if (displayUser.toLowerCase() !== 'burak') {
-        await createNotification(
-          'Burak',
-          'Aşı Dozu Tamamlandı ✅',
-          `${displayUser}, ${donor.name} bağışçısının ${doseLabel} aşısını tamamladı.`,
-          donor.id,
-          donor.name,
-          new Date().toISOString()
-        );
-      }
+      await createNotification(
+        'Burak',
+        'Aşı Dozu Tamamlandı ✅',
+        `${displayUser}, ${donor.name} bağışçısının ${doseLabel} aşısını tamamladı.`,
+        donor.id,
+        donor.name,
+        new Date().toISOString(),
+        `vac_done_${donor.id}_${index}`
+      );
     }
   };
 
@@ -958,7 +934,7 @@ export default function App() {
 
   const sortedMonthKeys = Object.keys(groupedDonors).sort((a, b) => a.localeCompare(b));
   const activeVaccineDonor = donors.find((d) => d.id === activeVaccineDonorId);
-  const unreadCount = notifications.filter(n => !n.read).length;
+  const unreadCount = notifications.filter((n) => !n.read).length;
 
   if (authLoading) {
     return (
@@ -1056,6 +1032,7 @@ export default function App() {
     const boxBg = stepObj.completed ? 'border-emerald-300 bg-emerald-50/60' : 'border-slate-200 bg-white';
     const titleColor = stepObj.completed ? 'text-emerald-800' : 'text-slate-700';
     const isIdmSaved = savedIdmNoteId === donor.id;
+    const currentIdmNote = idmNotesDraft[donor.id] !== undefined ? idmNotesDraft[donor.id] : (stepObj.note || '');
 
     return (
       <div className={`p-3 rounded-xl border ${boxBg} space-y-2 flex flex-col justify-start transition-colors h-full`}>
@@ -1112,16 +1089,13 @@ export default function App() {
           <div className="pt-2 mt-2 border-t border-slate-100">
             <span className="text-[10px] font-semibold text-slate-500 mb-1 block">📝 Süreç Açıklaması:</span>
             <textarea
-              defaultValue={stepObj.note || ''}
-              id={`idm-note-${donor.id}`}
+              value={currentIdmNote}
+              onChange={(e) => setIdmNotesDraft((prev) => ({ ...prev, [donor.id]: e.target.value }))}
               placeholder="Örn: Rapor bekleniyor..."
               className="w-full border border-slate-200 rounded-lg p-1.5 text-[11px] text-slate-700 focus:outline-indigo-500 resize-y min-h-[44px] max-h-40 bg-white/60 mb-1 shadow-inner leading-relaxed"
             />
             <button
-              onClick={() => {
-                const val = (document.getElementById(`idm-note-${donor.id}`) as HTMLTextAreaElement)?.value;
-                handleIdmNoteSave(donor.id, val);
-              }}
+              onClick={() => handleIdmNoteSave(donor.id, currentIdmNote)}
               className={`w-full text-[10px] font-bold py-1.5 rounded-lg transition cursor-pointer ${
                 isIdmSaved
                   ? 'bg-emerald-100 text-emerald-700'
@@ -1171,24 +1145,42 @@ export default function App() {
 
               {showNotifMenu && (
                 <div className="fixed top-[70px] left-4 right-4 sm:absolute sm:top-auto sm:left-auto sm:right-0 sm:mt-3 sm:w-96 bg-white rounded-2xl shadow-2xl border border-slate-100 overflow-hidden z-50 text-slate-800">
-                  <div className="p-4 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+                  <div className="p-3.5 bg-slate-50 border-b border-slate-100 flex items-center justify-between gap-2">
                     <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
                       <span>🔔</span> Bildirimler ({unreadCount})
                     </span>
-                    {unreadCount > 0 && (
+                    <div className="flex items-center gap-1.5">
                       <button
-                        onClick={markAllNotificationsAsRead}
-                        className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 transition cursor-pointer bg-indigo-50 px-2.5 py-1 rounded-md"
+                        type="button"
+                        onClick={() =>
+                          createNotification(
+                            displayUser,
+                            'Test Bildirimi 🔔',
+                            `Merhaba ${displayUser}, bildirim sistemi sorunsuz çalışıyor!`,
+                            '',
+                            ''
+                          )
+                        }
+                        className="text-[10px] font-bold text-emerald-700 hover:text-emerald-900 transition cursor-pointer bg-emerald-50 border border-emerald-200 px-2 py-1 rounded-md"
                       >
-                        Tümünü Oku
+                        ⚡ Test Gönder
                       </button>
-                    )}
+                      {unreadCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={markAllNotificationsAsRead}
+                          className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 transition cursor-pointer bg-indigo-50 px-2.5 py-1 rounded-md"
+                        >
+                          Tümünü Oku
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   <div className="max-h-[60vh] sm:max-h-72 overflow-y-auto divide-y divide-slate-100">
                     {notifications.length === 0 ? (
                       <div className="p-6 text-center text-xs text-slate-400 font-medium">
-                        Henüz vakti gelmiş bir bildiriminiz bulunmuyor.
+                        Henüz bir bildiriminiz bulunmuyor.
                       </div>
                     ) : (
                       notifications.map((notif) => (
@@ -1214,9 +1206,11 @@ export default function App() {
                           <p className="text-[11.5px] text-slate-600 leading-relaxed mb-2">
                             {notif.message}
                           </p>
-                          <span className="text-[10px] text-indigo-600 font-bold inline-block hover:underline">
-                            Karta Git ➔
-                          </span>
+                          {notif.donorId && (
+                            <span className="text-[10px] text-indigo-600 font-bold inline-block hover:underline">
+                              Karta Git ➔
+                            </span>
+                          )}
                         </div>
                       ))
                     )}
@@ -1399,6 +1393,7 @@ export default function App() {
                       {isMonthOpen && (
                         <div className="space-y-3 ml-1 sm:ml-3">
                           {group.donors.map((donor) => {
+                            const isCardOpen = openDonorIds[donor.id] ?? true;
                             const completedDoses = donor.vaccineDates?.filter((v) => v.completed).length || 0;
                             const allVaccinesDone = donor.vaccineDates && donor.vaccineDates.length > 0 && completedDoses === donor.vaccineDates.length;
 
@@ -1428,6 +1423,7 @@ export default function App() {
 
                             const isAuditOpen = openAuditLogIds[donor.id] ?? false;
                             const isStatusSaved = savedStatusNoteId === donor.id;
+                            const currentStatusNote = statusNotesDraft[donor.id] !== undefined ? statusNotesDraft[donor.id] : (donor.statusNote || '');
 
                             return (
                               <div
@@ -1440,7 +1436,7 @@ export default function App() {
                                   className="flex justify-between items-center p-3.5 hover:bg-slate-50/70 cursor-pointer select-none gap-2 border-b border-slate-100/70"
                                 >
                                   <div className="flex items-center gap-2.5 flex-1 flex-wrap">
-                                    <span className={`text-indigo-600 font-bold transition-transform duration-200 ${donor.isOpen ? 'rotate-90' : ''}`}>
+                                    <span className={`text-indigo-600 font-bold transition-transform duration-200 ${isCardOpen ? 'rotate-90' : ''}`}>
                                       ▶
                                     </span>
                                     <input
@@ -1472,16 +1468,18 @@ export default function App() {
 
                                   <div className="flex items-center gap-3" onClick={(e) => e.stopPropagation()}>
                                     {vaccineBadge}
-                                    <button
-                                      onClick={() => handleDeleteDonor(donor)}
-                                      className="text-xs bg-red-100 hover:bg-red-200 text-red-600 px-2.5 py-1 rounded-lg font-medium transition cursor-pointer"
-                                    >
-                                      Sil
-                                    </button>
+                                    {isManager && (
+                                      <button
+                                        onClick={() => handleDeleteDonor(donor)}
+                                        className="text-xs bg-red-100 hover:bg-red-200 text-red-600 px-2.5 py-1 rounded-lg font-medium transition cursor-pointer"
+                                      >
+                                        Sil
+                                      </button>
+                                    )}
                                   </div>
                                 </div>
 
-                                {donor.isOpen && (
+                                {isCardOpen && (
                                   <div className="p-4 bg-white/90 space-y-4 text-xs">
                                     <div className="flex flex-col lg:flex-row items-start lg:items-center gap-2 bg-slate-50 p-2.5 rounded-xl border border-slate-200 w-full">
                                       <div className="flex items-center gap-1.5 shrink-0 bg-white px-2 py-1 rounded-lg border border-slate-200">
@@ -1522,16 +1520,13 @@ export default function App() {
                                       </select>
                                       <div className="flex-1 w-full lg:w-auto flex gap-2 items-start">
                                         <textarea
-                                          id={`status-note-${donor.id}`}
-                                          defaultValue={donor.statusNote || ''}
+                                          value={currentStatusNote}
+                                          onChange={(e) => setStatusNotesDraft((prev) => ({ ...prev, [donor.id]: e.target.value }))}
                                           placeholder="İptal/Bekleme nedeni (Örn: Grip oldu, 1 ay ertelendi vb.)"
                                           className="flex-1 border border-slate-300 rounded-md p-1.5 text-xs focus:outline-indigo-500 bg-white resize-y min-h-[34px] max-h-32 leading-relaxed"
                                         />
                                         <button
-                                          onClick={() => {
-                                            const val = (document.getElementById(`status-note-${donor.id}`) as HTMLTextAreaElement)?.value;
-                                            handleStatusNoteSave(donor.id, val);
-                                          }}
+                                          onClick={() => handleStatusNoteSave(donor.id, currentStatusNote)}
                                           className={`px-3 py-1.5 rounded-md text-xs font-bold transition whitespace-nowrap cursor-pointer ${
                                             isStatusSaved
                                               ? 'bg-emerald-100 text-emerald-700'
@@ -1571,7 +1566,7 @@ export default function App() {
                                         <button
                                           onClick={() => {
                                             setActiveVaccineDonorId(donor.id);
-                                            setCollectionDateInput(donor.vaccineDates?.find(v => v.label.includes('10. Doz'))?.date || '');
+                                            setCollectionDateInput(donor.vaccineDates?.find((v) => v.label.includes('10. Doz'))?.date || '');
                                           }}
                                           className={`w-full ${vaccineBtnColor} font-medium py-1.5 rounded-lg transition text-center mt-auto cursor-pointer`}
                                         >
@@ -1650,52 +1645,6 @@ export default function App() {
 
         {currentTab === 'reporting' && <ReportingTab donors={donors} />}
       </main>
-
-      {/* ANLIK AÇILIR BİLDİRİM (MODAL) */}
-      {activeModalNotification && (
-        <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in">
-          <div className="bg-white rounded-3xl p-6 sm:p-7 max-w-md w-full space-y-4 shadow-2xl border border-slate-100 text-center">
-            <div className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-2xl mx-auto flex items-center justify-center text-2xl shadow-xs">
-              🔔
-            </div>
-            <div>
-              <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-full">
-                Yeni Bildirim / İşlem
-              </span>
-              <h3 className="font-bold text-slate-800 text-base mt-2">
-                {activeModalNotification.title}
-              </h3>
-              <p className="text-xs text-slate-600 mt-2 leading-relaxed bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
-                {activeModalNotification.message}
-              </p>
-            </div>
-            
-            <div className="flex flex-col sm:flex-row gap-2 pt-1">
-              <button
-                onClick={() => {
-                  markNotificationAsRead(activeModalNotification.id);
-                  if (activeModalNotification.donorId) {
-                    handleSelectDonorFromPlan(activeModalNotification.donorId);
-                  }
-                  setActiveModalNotification(null);
-                }}
-                className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 rounded-xl text-xs transition shadow-md cursor-pointer"
-              >
-                İlgili Bağışçı Karta Git ➔
-              </button>
-              <button
-                onClick={() => {
-                  markNotificationAsRead(activeModalNotification.id);
-                  setActiveModalNotification(null);
-                }}
-                className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-2.5 px-4 rounded-xl text-xs transition cursor-pointer"
-              >
-                Okundu Olarak Kapat
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* 10 Doz Aşı Modalı */}
       {activeVaccineDonor && (
