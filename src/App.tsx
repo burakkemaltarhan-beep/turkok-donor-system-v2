@@ -93,7 +93,6 @@ const stepLabels: Record<'healthCheck' | 'publicHealth' | 'transplantTube' | 'id
   postTransplantCheck: 'Nakil Sonrası Sağlık'
 };
 
-// UTC kaymasını önleyen yerel YYYY-MM-DD tarih formatlayıcı
 const formatLocalDate = (dateObj: Date): string => {
   const year = dateObj.getFullYear();
   const month = String(dateObj.getMonth() + 1).padStart(2, '0');
@@ -130,15 +129,17 @@ export default function App() {
 
   const [donors, setDonors] = useState<Donor[]>([]);
   const [currentTab, setCurrentTab] = useState<'operation' | 'this-week' | 'next-week' | 'reporting'>('operation');
+  
+  // YENİ: Ortak Liste ve Bana Atananlar Görünüm Modu State'i
+  const [taskViewMode, setTaskViewMode] = useState<'all' | 'mine'>('all');
+
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedYear, setSelectedYear] = useState<string>('all');
 
-  // Kart ve Ay açık/kapalı durumları diğer kullanıcıların ekranını bozmamak için yerel state'te tutulur
   const [monthAccordionState, setMonthAccordionState] = useState<Record<string, boolean>>({});
   const [openDonorIds, setOpenDonorIds] = useState<Record<string, boolean>>({});
   const [openAuditLogIds, setOpenAuditLogIds] = useState<Record<string, boolean>>({});
 
-  // Not alanları için kontrollü state yapısı
   const [statusNotesDraft, setStatusNotesDraft] = useState<Record<string, string>>({});
   const [idmNotesDraft, setIdmNotesDraft] = useState<Record<string, string>>({});
 
@@ -171,7 +172,6 @@ export default function App() {
   const displayUser = getDisplayName(user?.email);
   const isManager = displayUser.toLowerCase() === 'burak';
 
-  // Merkezi Netlify Push Fonksiyonu Tetikleyicisi (3 saniye Debounce korumalı)
   const triggerPushCheck = useCallback(async (force = false) => {
     const now = Date.now();
     if (!force && now - lastPushTriggerRef.current < 3000) {
@@ -224,7 +224,6 @@ export default function App() {
     }));
   };
 
-  // Mükerrer bildirim oluşmasını önleyen (deterministicId destekli) bildirim fonksiyonu
   const createNotification = async (
     toUser: string,
     title: string,
@@ -273,7 +272,6 @@ export default function App() {
     }
   };
 
-  // Tüm bildirimleri tek seferde (Batch ile) okundu olarak işaretle
   const markAllNotificationsAsRead = async () => {
     const unread = notifications.filter((n) => !n.read);
     if (unread.length === 0) return;
@@ -297,7 +295,6 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // CİHAZ FCM TOKEN KAYDI
   useEffect(() => {
     if (user && displayUser && displayUser !== 'Koordinatör') {
       try {
@@ -308,7 +305,6 @@ export default function App() {
     }
   }, [user, displayUser]);
 
-  // ARKA PLAN PERİYODİK NETLIFY TETİKLEYİCİSİ
   useEffect(() => {
     if (!user) return;
 
@@ -328,7 +324,6 @@ export default function App() {
     };
   }, [user, triggerPushCheck]);
 
-  // CANLI BİLDİRİM LİSTESİ DİNLEYİCİSİ (Zil Menüsü İçin)
   useEffect(() => {
     if (!user || !displayUser) return;
 
@@ -663,7 +658,6 @@ export default function App() {
     };
     await handleSaveDonor(updated);
 
-    // 1. Sorumlu atandığında ANINDA bildirim oluştur (Mükerrer önleyici anahtar ile)
     if (key === 'completedBy' && value) {
       await createNotification(
         value,
@@ -676,7 +670,6 @@ export default function App() {
       );
     }
 
-    // 2. Tarih değiştirildiyse ve sorumlusu zaten belliyse güncel tarih bildirimi gönder
     if (key === 'date' && value && updatedStep.completedBy) {
       await createNotification(
         updatedStep.completedBy,
@@ -689,7 +682,6 @@ export default function App() {
       );
     }
 
-    // 3. Görev tamamlandığında yöneticiye (Burak) anında bildirim gönder
     if (key === 'completed' && value === true) {
       await createNotification(
         'Burak',
@@ -780,7 +772,6 @@ export default function App() {
       return;
     }
 
-    // Yerel saat dilimine göre güvenli tarih oluşturma (UTC kaymasını engeller)
     const colDateObj = new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0);
     if (isNaN(colDateObj.getTime())) {
       alert('Geçersiz tarih formatı.');
@@ -905,11 +896,16 @@ export default function App() {
     )
   ).sort().reverse();
 
+  // YENİ: Arama/yıl filtresi sonrasında Ortak Liste veya Bana Atananlar filtresini uygulama
   const filteredDonors = donors.filter((d) => {
     const nameMatch = d.name?.toLowerCase().includes(searchTerm.toLowerCase().trim());
     const donorYear = d.healthCheck?.date ? d.healthCheck.date.split('-')[0] : '';
     const yearMatch = selectedYear === 'all' || donorYear === selectedYear || donorYear === '';
-    return nameMatch && yearMatch;
+    
+    // Görünüm Modu Filtresi (Ortak Liste vs Bana Atananlar)
+    const viewMatch = taskViewMode === 'all' || d.assignedTo === displayUser;
+
+    return nameMatch && yearMatch && viewMatch;
   });
 
   const groupedDonors: Record<string, { display: string; donors: Donor[] }> = {};
@@ -1127,7 +1123,6 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3">
-            {/* CANLI BİLDİRİM MERKEZİ */}
             <div className="relative">
               <button
                 type="button"
@@ -1296,6 +1291,32 @@ export default function App() {
               onSelectDonor={handleSelectDonorFromPlan}
             />
 
+            {/* YENİ: Ortak Liste ve Bana Atananlar Geçiş Sekmeleri */}
+            <div className="flex items-center gap-2 bg-white p-1.5 rounded-2xl w-fit border border-slate-200 shadow-2xs">
+              <button
+                onClick={() => setTaskViewMode('all')}
+                className={`px-4 py-2 text-xs font-bold rounded-xl transition cursor-pointer flex items-center gap-1.5 ${
+                  taskViewMode === 'all'
+                    ? 'bg-indigo-600 text-white shadow-sm'
+                    : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                <span>📋</span>
+                <span>Ortak Liste ({donors.length})</span>
+              </button>
+              <button
+                onClick={() => setTaskViewMode('mine')}
+                className={`px-4 py-2 text-xs font-bold rounded-xl transition cursor-pointer flex items-center gap-1.5 ${
+                  taskViewMode === 'mine'
+                    ? 'bg-indigo-600 text-white shadow-sm'
+                    : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                <span>👤</span>
+                <span>Bana Atananlar ({donors.filter(d => d.assignedTo === displayUser).length})</span>
+              </button>
+            </div>
+
             <div className="bg-white p-4 rounded-2xl shadow-xs border border-slate-200 space-y-2.5">
               <div className="flex justify-between items-center">
                 <h2 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
@@ -1366,7 +1387,9 @@ export default function App() {
             <div className="space-y-4">
               {filteredDonors.length === 0 ? (
                 <div className="bg-white p-8 rounded-2xl text-center text-xs text-slate-400 border border-slate-200">
-                  Filtrelere uygun bağışçı kaydı bulunamadı.
+                  {taskViewMode === 'mine' 
+                    ? `(${displayUser}) üzerine atanmış aktif bir süreç bulunmuyor veya filtrelere uygun kayıt yok.` 
+                    : 'Filtrelere uygun bağışçı kaydı bulunamadı.'}
                 </div>
               ) : (
                 sortedMonthKeys.map((sortKey) => {
@@ -1646,7 +1669,6 @@ export default function App() {
         {currentTab === 'reporting' && <ReportingTab donors={donors} />}
       </main>
 
-      {/* 10 Doz Aşı Modalı */}
       {activeVaccineDonor && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-6 max-w-2xl w-full space-y-4 shadow-2xl border border-slate-100">
