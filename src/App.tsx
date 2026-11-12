@@ -130,7 +130,7 @@ export default function App() {
   const [donors, setDonors] = useState<Donor[]>([]);
   const [currentTab, setCurrentTab] = useState<'operation' | 'this-week' | 'next-week' | 'reporting'>('operation');
   
-  // YENİ: Ortak Liste ve Bana Atananlar Görünüm Modu State'i
+  // Ortak Liste ve Bana Atananlar Görünüm Modu State'i
   const [taskViewMode, setTaskViewMode] = useState<'all' | 'mine'>('all');
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -896,14 +896,29 @@ export default function App() {
     )
   ).sort().reverse();
 
-  // YENİ: Arama/yıl filtresi sonrasında Ortak Liste veya Bana Atananlar filtresini uygulama
+  // Gelişmiş Filtreleme (Ana Dosya Sorumlusu + Alt Adım Görevlileri + Aşı Sorumluları Dahil)
   const filteredDonors = donors.filter((d) => {
     const nameMatch = d.name?.toLowerCase().includes(searchTerm.toLowerCase().trim());
     const donorYear = d.healthCheck?.date ? d.healthCheck.date.split('-')[0] : '';
     const yearMatch = selectedYear === 'all' || donorYear === selectedYear || donorYear === '';
     
     // Görünüm Modu Filtresi (Ortak Liste vs Bana Atananlar)
-    const viewMatch = taskViewMode === 'all' || d.assignedTo === displayUser;
+    const viewMatch = taskViewMode === 'all' || (() => {
+      // 1. Ana dosya sorumlusu kendisiyse
+      if (d.assignedTo === displayUser) return true;
+
+      // 2. Alt adımlardan herhangi birinde sorumluysa
+      if (d.healthCheck?.completedBy === displayUser) return true;
+      if (d.publicHealth?.completedBy === displayUser) return true;
+      if (d.transplantTube?.completedBy === displayUser) return true;
+      if (d.idm?.completedBy === displayUser) return true;
+      if (d.postTransplantCheck?.completedBy === displayUser) return true;
+
+      // 3. 10 Doz aşı takviminden herhangi bir dozda sorumluysa
+      if (d.vaccineDates && d.vaccineDates.some(v => v.completedBy === displayUser)) return true;
+
+      return false;
+    })();
 
     return nameMatch && yearMatch && viewMatch;
   });
@@ -1291,7 +1306,7 @@ export default function App() {
               onSelectDonor={handleSelectDonorFromPlan}
             />
 
-            {/* YENİ: Ortak Liste ve Bana Atananlar Geçiş Sekmeleri */}
+            {/* Ortak Liste ve Bana Atananlar Geçiş Sekmeleri */}
             <div className="flex items-center gap-2 bg-white p-1.5 rounded-2xl w-fit border border-slate-200 shadow-2xs">
               <button
                 onClick={() => setTaskViewMode('all')}
@@ -1313,7 +1328,16 @@ export default function App() {
                 }`}
               >
                 <span>👤</span>
-                <span>Bana Atananlar ({donors.filter(d => d.assignedTo === displayUser).length})</span>
+                <span>Bana Atananlar ({donors.filter(d => {
+                  if (d.assignedTo === displayUser) return true;
+                  if (d.healthCheck?.completedBy === displayUser) return true;
+                  if (d.publicHealth?.completedBy === displayUser) return true;
+                  if (d.transplantTube?.completedBy === displayUser) return true;
+                  if (d.idm?.completedBy === displayUser) return true;
+                  if (d.postTransplantCheck?.completedBy === displayUser) return true;
+                  if (d.vaccineDates && d.vaccineDates.some(v => v.completedBy === displayUser)) return true;
+                  return false;
+                }).length})</span>
               </button>
             </div>
 
@@ -1388,7 +1412,7 @@ export default function App() {
               {filteredDonors.length === 0 ? (
                 <div className="bg-white p-8 rounded-2xl text-center text-xs text-slate-400 border border-slate-200">
                   {taskViewMode === 'mine' 
-                    ? `(${displayUser}) üzerine atanmış aktif bir süreç bulunmuyor veya filtrelere uygun kayıt yok.` 
+                    ? `(${displayUser}) üzerine atanmış aktif bir süreç veya alt görev bulunmuyor.` 
                     : 'Filtrelere uygun bağışçı kaydı bulunamadı.'}
                 </div>
               ) : (
