@@ -8,10 +8,12 @@ import {
   orderBy,
   doc,
   setDoc,
+  updateDoc,
   deleteDoc,
   addDoc,
   where,
-  writeBatch
+  writeBatch,
+  arrayUnion
 } from 'firebase/firestore';
 import { auth, db } from './config/firebase';
 import { requestAndSaveFCMToken } from './utils/fcm';
@@ -100,6 +102,14 @@ const formatLocalDate = (dateObj: Date): string => {
   return `${year}-${month}-${day}`;
 };
 
+// UTC saat dilimi kaymasını önleyen güvenli yerel tarih çözümleyici
+const parseLocalDate = (dateStr: string): Date | null => {
+  if (!dateStr) return null;
+  const parts = dateStr.trim().split('-').map(Number);
+  if (parts.length !== 3 || parts.some(isNaN)) return null;
+  return new Date(parts[0], parts[1] - 1, parts[2], 0, 0, 0, 0);
+};
+
 export const getDonorSortKey = (d: Donor) => {
   if (!d.healthCheck?.date) return '9999-12';
   const clean = String(d.healthCheck.date).trim();
@@ -129,7 +139,6 @@ export default function App() {
 
   const [donors, setDonors] = useState<Donor[]>([]);
   const [currentTab, setCurrentTab] = useState<'operation' | 'this-week' | 'next-week' | 'reporting'>('operation');
-  
   const [taskViewMode, setTaskViewMode] = useState<'all' | 'mine'>('all');
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -173,7 +182,7 @@ export default function App() {
 
   const triggerPushCheck = useCallback(async (force = false) => {
     const now = Date.now();
-    if (!force && now - lastPushTriggerRef.current < 3000) {
+    if (!force && now - lastPushTriggerRef.current < 5000) {
       return;
     }
     lastPushTriggerRef.current = now;
@@ -193,12 +202,27 @@ export default function App() {
     }
   }, []);
 
-  const handleSaveDonor = async (updatedDonor: Donor) => {
+  // YENİ: Veri ezilmesini (Race Condition) önleyen atomik kısmi güncelleme fonksiyonu
+  const updateDonorFields = async (
+    donorId: string,
+    fieldsToUpdate: Record<string, any>,
+    auditAction?: string
+  ) => {
     try {
-      const { id, isOpen, ...dataToSave } = updatedDonor;
-      await setDoc(doc(db, 'donors', id), dataToSave, { merge: true });
+      const donorRef = doc(db, 'donors', donorId);
+      const payload: Record<string, any> = { ...fieldsToUpdate };
+
+      if (auditAction) {
+        payload.auditLogs = arrayUnion({
+          date: new Date().toISOString(),
+          user: displayUser,
+          action: auditAction
+        });
+      }
+
+      await updateDoc(donorRef, payload);
     } catch (err) {
-      console.error('Kayıt kaydedilemedi:', err);
+      console.error('Güncelleme kaydedilemedi:', err);
     }
   };
 
@@ -304,23 +328,11 @@ export default function App() {
     }
   }, [user, displayUser]);
 
+  // OPTİMİZASYON: Gereksiz 90sn interval kaldırıldı (Netlify Cron Job zaten çalışıyor).
+  // Sadece ilk girişte 1 kez kontrol tetiklenir.
   useEffect(() => {
     if (!user) return;
-
-    triggerPushCheck(true);
-    const interval = setInterval(() => triggerPushCheck(false), 90000);
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        triggerPushCheck(false);
-      }
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
+    triggerPushCheck(false);
   }, [user, triggerPushCheck]);
 
   useEffect(() => {
@@ -381,6 +393,12 @@ export default function App() {
           if (docSnapshot.id === '--month-states--') return;
 
           const data = docSnapshot.data() as any;
+          const rawLogs: AuditLog[] = Array.isArray(data.auditLogs) ? data.auditLogs : [];
+          // arrayUnion sona eklediği için arayüzde en yeni logun en üstte görünmesini garanti ederiz
+          const sortedLogs = [...rawLogs].sort(
+            (a, b) => (new Date(b.date).getTime() || 0) - (new Date(a.date).getTime() || 0)
+          );
+
           donorList.push({
             id: docSnapshot.id,
             name: data.name || '',
@@ -396,7 +414,7 @@ export default function App() {
             postTransplantCheck: data.postTransplantCheck || { date: '', completed: false, completedBy: '' },
             vaccineDates: data.vaccineDates || [],
             vaccinePostponed: data.vaccinePostponed || false,
-            auditLogs: data.auditLogs || []
+            auditLogs: sortedLogs
           });
         });
         setDonors(donorList);
@@ -450,6 +468,7 @@ export default function App() {
   const handleSelectDonorFromPlan = (donorId: string) => {
     setSearchTerm('');
     setSelectedYear('all');
+    setTaskViewMode('all');
     setCurrentTab('operation');
 
     const donor = donors.find((d) => d.id === donorId);
@@ -484,8 +503,7 @@ export default function App() {
     }
 
     const newId = Date.now().toString() + Math.random().toString().substring(2, 7);
-    const newDonor: Donor = {
-      id: newId,
+    const newDonorData = {
       name: newDonorName.trim(),
       hospital: newDonorHospital || '',
       assignedTo: '',
@@ -507,10 +525,14 @@ export default function App() {
       ]
     };
 
-    await handleSaveDonor(newDonor);
-    setOpenDonorIds((prev) => ({ ...prev, [newId]: true }));
-    setNewDonorName('');
-    setNewDonorHospital('');
+    try {
+      await setDoc(doc(db, 'donors', newId), newDonorData);
+      setOpenDonorIds((prev) => ({ ...prev, [newId]: true }));
+      setNewDonorName('');
+      setNewDonorHospital('');
+    } catch (err) {
+      console.error('Yeni bağışçı eklenemedi:', err);
+    }
   };
 
   const handleAssignDonor = async (donorId: string, assignedMember: string) => {
@@ -522,21 +544,11 @@ export default function App() {
     const donor = donors.find((d) => d.id === donorId);
     if (!donor) return;
 
-    const updated: Donor = {
-      ...donor,
-      assignedTo: assignedMember,
-      auditLogs: [
-        {
-          date: new Date().toISOString(),
-          user: displayUser,
-          action: assignedMember
-            ? `Dosya sorumlusu '${assignedMember}' olarak atandı.`
-            : `Dosya sorumlusu ataması kaldırıldı.`
-        },
-        ...(donor.auditLogs || [])
-      ]
-    };
-    await handleSaveDonor(updated);
+    const actionText = assignedMember
+      ? `Dosya sorumlusu '${assignedMember}' olarak atandı.`
+      : `Dosya sorumlusu ataması kaldırıldı.`;
+
+    await updateDonorFields(donorId, { assignedTo: assignedMember }, actionText);
 
     if (assignedMember) {
       await createNotification(
@@ -570,43 +582,23 @@ export default function App() {
   const handleNameChange = (id: string, newName: string) => {
     const donor = donors.find((d) => d.id === id);
     if (!donor || !newName.trim() || donor.name === newName.trim()) return;
-    const updated: Donor = {
-      ...donor,
-      name: newName.trim(),
-      auditLogs: [
-        { date: new Date().toISOString(), user: displayUser, action: `İsim '${donor.name}' iken '${newName.trim()}' yapıldı.` },
-        ...(donor.auditLogs || [])
-      ]
-    };
-    handleSaveDonor(updated);
+    updateDonorFields(
+      id,
+      { name: newName.trim() },
+      `İsim '${donor.name}' iken '${newName.trim()}' yapıldı.`
+    );
   };
 
   const handleStatusChange = (id: string, newStatus: string) => {
     const donor = donors.find((d) => d.id === id);
     if (!donor) return;
-    const updated: Donor = {
-      ...donor,
-      status: newStatus,
-      auditLogs: [
-        { date: new Date().toISOString(), user: displayUser, action: `Süreç durumu '${newStatus}' yapıldı.` },
-        ...(donor.auditLogs || [])
-      ]
-    };
-    handleSaveDonor(updated);
+    updateDonorFields(id, { status: newStatus }, `Süreç durumu '${newStatus}' yapıldı.`);
   };
 
   const handleStatusNoteSave = (id: string, noteVal: string) => {
     const donor = donors.find((d) => d.id === id);
     if (!donor) return;
-    const updated: Donor = {
-      ...donor,
-      statusNote: noteVal,
-      auditLogs: [
-        { date: new Date().toISOString(), user: displayUser, action: `Durum açıklaması kaydedildi.` },
-        ...(donor.auditLogs || [])
-      ]
-    };
-    handleSaveDonor(updated);
+    updateDonorFields(id, { statusNote: noteVal }, `Durum açıklaması kaydedildi.`);
     setSavedStatusNoteId(id);
     setTimeout(() => setSavedStatusNoteId(null), 2000);
   };
@@ -614,15 +606,11 @@ export default function App() {
   const handleHospitalChange = (id: string, hosp: string) => {
     const donor = donors.find((d) => d.id === id);
     if (!donor) return;
-    const updated: Donor = {
-      ...donor,
-      hospital: hosp,
-      auditLogs: [
-        { date: new Date().toISOString(), user: displayUser, action: `Hastane '${hosp || "Belirtilmedi"}' olarak güncellendi.` },
-        ...(donor.auditLogs || [])
-      ]
-    };
-    handleSaveDonor(updated);
+    updateDonorFields(
+      id,
+      { hospital: hosp },
+      `Hastane '${hosp || 'Belirtilmedi'}' olarak güncellendi.`
+    );
   };
 
   const handleStepFieldChange = async (
@@ -645,17 +633,10 @@ export default function App() {
 
     let actionMsg = `${stepLabel} güncellendi.`;
     if (key === 'completed') actionMsg = `${stepLabel} ${value ? 'tamamlandı olarak işaretlendi.' : 'işareti kaldırıldı.'}`;
-    if (key === 'completedBy') actionMsg = `${stepLabel} sorumlusu '${value || "Seçilmedi"}' atandı.`;
+    if (key === 'completedBy') actionMsg = `${stepLabel} sorumlusu '${value || 'Seçilmedi'}' atandı.`;
 
-    const updated: Donor = {
-      ...donor,
-      [field]: updatedStep,
-      auditLogs: [
-        { date: new Date().toISOString(), user: displayUser, action: actionMsg },
-        ...(donor.auditLogs || [])
-      ]
-    };
-    await handleSaveDonor(updated);
+    // Nokta notasyonu ile sadece ilgili alt alanı günceller (diğer alanları ezmez)
+    await updateDonorFields(donorId, { [`${field}.${key}`]: value }, actionMsg);
 
     if (key === 'completedBy' && value) {
       await createNotification(
@@ -700,14 +681,16 @@ export default function App() {
     setTimeout(() => setSavedIdmNoteId(null), 2000);
   };
 
+  // DÜZELTME: UTC kaymasını önlemek için parseLocalDate kullanıldı
   const getDateStatus = (stepObj?: StepDetail | VaccineDose) => {
     if (!stepObj || !stepObj.date) return 'normal';
     if (stepObj.completed) return 'completed';
+
     const todayDate = new Date();
     todayDate.setHours(0, 0, 0, 0);
-    const target = new Date(stepObj.date);
-    target.setHours(0, 0, 0, 0);
-    if (isNaN(target.getTime())) return 'normal';
+
+    const target = parseLocalDate(stepObj.date);
+    if (!target) return 'normal';
 
     const diffDays = Math.round((target.getTime() - todayDate.getTime()) / (1000 * 60 * 60 * 24));
     if (diffDays < 0) return 'overdue';
@@ -765,14 +748,8 @@ export default function App() {
     const donor = donors.find((d) => d.id === donorId);
     if (!donor) return;
 
-    const parts = collectionDateInput.split('-').map(Number);
-    if (parts.length !== 3) {
-      alert('Geçersiz tarih formatı.');
-      return;
-    }
-
-    const colDateObj = new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0);
-    if (isNaN(colDateObj.getTime())) {
+    const colDateObj = parseLocalDate(collectionDateInput);
+    if (!colDateObj) {
       alert('Geçersiz tarih formatı.');
       return;
     }
@@ -799,20 +776,15 @@ export default function App() {
     postDate.setDate(colDateObj.getDate() + 20);
     const postDateStr = formatLocalDate(postDate);
 
-    const updated: Donor = {
-      ...donor,
-      vaccineDates: generatedDoses,
-      postTransplantCheck: {
-        ...(donor.postTransplantCheck || { completed: false, completedBy: '' }),
-        date: postDateStr
+    updateDonorFields(
+      donorId,
+      {
+        vaccineDates: generatedDoses,
+        'postTransplantCheck.date': postDateStr
       },
-      auditLogs: [
-        { date: new Date().toISOString(), user: displayUser, action: `10 Doz aşı planı ${collectionDateInput} toplama tarihine göre otomatik üretildi.` },
-        ...(donor.auditLogs || [])
-      ]
-    };
+      `10 Doz aşı planı ${collectionDateInput} toplama tarihine göre otomatik üretildi.`
+    );
 
-    handleSaveDonor(updated);
     alert('10 Doz aşı planı ve Nakil Sonrası Sağlık tarihi (+20 gün) başarıyla oluşturuldu!');
   };
 
@@ -833,15 +805,11 @@ export default function App() {
     const newDoses = [...donor.vaccineDates];
     newDoses[index] = { ...newDoses[index], [key]: val };
 
-    const updated: Donor = {
-      ...donor,
-      vaccineDates: newDoses,
-      auditLogs: [
-        { date: new Date().toISOString(), user: displayUser, action: `Aşı Doz #${index + 1} (${key}) güncellendi.` },
-        ...(donor.auditLogs || [])
-      ]
-    };
-    await handleSaveDonor(updated);
+    await updateDonorFields(
+      donorId,
+      { vaccineDates: newDoses },
+      `Aşı Doz #${index + 1} (${key}) güncellendi.`
+    );
 
     const dose = newDoses[index];
     const doseLabel = dose.label || `Doz #${index + 1}`;
@@ -876,15 +844,11 @@ export default function App() {
     const donor = donors.find((d) => d.id === donorId);
     if (!donor) return;
 
-    const updated: Donor = {
-      ...donor,
-      vaccinePostponed: isPostponed,
-      auditLogs: [
-        { date: new Date().toISOString(), user: displayUser, action: isPostponed ? 'Aşı takvimi ertelendi.' : 'Aşı takvimi ertelemesi kaldırıldı.' },
-        ...(donor.auditLogs || [])
-      ]
-    };
-    handleSaveDonor(updated);
+    updateDonorFields(
+      donorId,
+      { vaccinePostponed: isPostponed },
+      isPostponed ? 'Aşı takvimi ertelendi.' : 'Aşı takvimi ertelemesi kaldırıldı.'
+    );
   };
 
   const uniqueYears = Array.from(
@@ -895,37 +859,67 @@ export default function App() {
     )
   ).sort().reverse();
 
-  // Bugünün tarihi (YYYY-MM-DD)
   const todayStr = formatLocalDate(new Date());
 
-  // Gelişmiş Filtreleme (Bana Atananlar sekmesinde sadece bugün ve gelecek tarihler görünür)
-  const filteredDonors = donors.filter((d) => {
-    const nameMatch = d.name?.toLowerCase().includes(searchTerm.toLowerCase().trim());
-    const donorYear = d.healthCheck?.date ? d.healthCheck.date.split('-')[0] : '';
-    const yearMatch = selectedYear === 'all' || donorYear === selectedYear || donorYear === '';
-    
-    // Görünüm Modu Filtresi (Ortak Liste vs Bana Atananlar)
-    const viewMatch = taskViewMode === 'all' || (() => {
+  // YENİ: Hem sayaçta hem de filtrede ortak kullanılan kusursuz "Bana Atananlar" kontrol fonksiyonu
+  const isAssignedToCurrentUserTodayOrFuture = useCallback(
+    (d: Donor): boolean => {
+      if (d.status === 'İptal') return false;
+
       const isPendingFutureOrToday = (step?: StepDetail | VaccineDose) => {
         if (!step || !step.date || step.completed) return false;
         return step.date >= todayStr;
       };
 
-      // 1. Ana dosya sorumlusuysa
-      if (d.assignedTo === displayUser) return true;
-
-      // 2. Alt adımlardan herhangi birinde sorumluysa VE tarihi bugün/gelecekse (ve tamamlanmamışsa)
+      // 1. Alt adımlardan herhangi birinde sorumluysa VE tarihi bugün/gelecekse
       if (d.healthCheck?.completedBy === displayUser && isPendingFutureOrToday(d.healthCheck)) return true;
       if (d.publicHealth?.completedBy === displayUser && isPendingFutureOrToday(d.publicHealth)) return true;
       if (d.transplantTube?.completedBy === displayUser && isPendingFutureOrToday(d.transplantTube)) return true;
       if (d.idm?.completedBy === displayUser && isPendingFutureOrToday(d.idm)) return true;
       if (d.postTransplantCheck?.completedBy === displayUser && isPendingFutureOrToday(d.postTransplantCheck)) return true;
 
-      // 3. 10 Doz aşı takviminden herhangi bir dozda sorumluysa VE tarihi bugün/gelecekse
-      if (d.vaccineDates && d.vaccineDates.some(v => v.completedBy === displayUser && isPendingFutureOrToday(v))) return true;
+      // 2. Ertelenmemiş 10 Doz aşı takviminden herhangi bir dozda sorumluysa VE tarihi bugün/gelecekse
+      if (
+        !d.vaccinePostponed &&
+        d.vaccineDates &&
+        d.vaccineDates.some((v) => v.completedBy === displayUser && isPendingFutureOrToday(v))
+      ) {
+        return true;
+      }
+
+      // 3. Ana dosya sorumlusu kendisiyse: En az 1 tane bugün/gelecek tarihli bekleyen adımı varsa VEYA henüz hiçbir tarih planlanmamış yeni dosyaysa göster
+      if (d.assignedTo === displayUser) {
+        const hasAnyActiveFutureStep =
+          isPendingFutureOrToday(d.healthCheck) ||
+          isPendingFutureOrToday(d.publicHealth) ||
+          isPendingFutureOrToday(d.transplantTube) ||
+          isPendingFutureOrToday(d.idm) ||
+          isPendingFutureOrToday(d.postTransplantCheck) ||
+          (!d.vaccinePostponed && d.vaccineDates && d.vaccineDates.some((v) => isPendingFutureOrToday(v)));
+
+        const hasNoDatesEnteredYet =
+          !d.healthCheck?.date &&
+          !d.publicHealth?.date &&
+          !d.transplantTube?.date &&
+          !d.idm?.date &&
+          !d.postTransplantCheck?.date &&
+          (!d.vaccineDates || d.vaccineDates.length === 0);
+
+        if (hasAnyActiveFutureStep || hasNoDatesEnteredYet) return true;
+      }
 
       return false;
-    })();
+    },
+    [displayUser, todayStr]
+  );
+
+  const myAssignedCount = donors.filter(isAssignedToCurrentUserTodayOrFuture).length;
+
+  const filteredDonors = donors.filter((d) => {
+    const nameMatch = d.name?.toLowerCase().includes(searchTerm.toLowerCase().trim());
+    const donorYear = d.healthCheck?.date ? d.healthCheck.date.split('-')[0] : '';
+    const yearMatch = selectedYear === 'all' || donorYear === selectedYear || donorYear === '';
+    const viewMatch = taskViewMode === 'all' || isAssignedToCurrentUserTodayOrFuture(d);
 
     return nameMatch && yearMatch && viewMatch;
   });
@@ -1335,20 +1329,7 @@ export default function App() {
                 }`}
               >
                 <span>👤</span>
-                <span>Bana Atananlar ({donors.filter(d => {
-                  const isPendingFutureOrToday = (step?: StepDetail | VaccineDose) => {
-                    if (!step || !step.date || step.completed) return false;
-                    return step.date >= todayStr;
-                  };
-                  if (d.assignedTo === displayUser) return true;
-                  if (d.healthCheck?.completedBy === displayUser && isPendingFutureOrToday(d.healthCheck)) return true;
-                  if (d.publicHealth?.completedBy === displayUser && isPendingFutureOrToday(d.publicHealth)) return true;
-                  if (d.transplantTube?.completedBy === displayUser && isPendingFutureOrToday(d.transplantTube)) return true;
-                  if (d.idm?.completedBy === displayUser && isPendingFutureOrToday(d.idm)) return true;
-                  if (d.postTransplantCheck?.completedBy === displayUser && isPendingFutureOrToday(d.postTransplantCheck)) return true;
-                  if (d.vaccineDates && d.vaccineDates.some(v => v.completedBy === displayUser && isPendingFutureOrToday(v))) return true;
-                  return false;
-                }).length})</span>
+                <span>Bana Atananlar ({myAssignedCount})</span>
               </button>
             </div>
 
@@ -1422,8 +1403,8 @@ export default function App() {
             <div className="space-y-4">
               {filteredDonors.length === 0 ? (
                 <div className="bg-white p-8 rounded-2xl text-center text-xs text-slate-400 border border-slate-200">
-                  {taskViewMode === 'mine' 
-                    ? `(${displayUser}) üzerine atanmış bugün veya gelecek tarihli aktif bir iş bulunmuyor.` 
+                  {taskViewMode === 'mine'
+                    ? `(${displayUser}) üzerine atanmış bugün veya gelecek tarihli aktif bir iş bulunmuyor.`
                     : 'Filtrelere uygun bağışçı kaydı bulunamadı.'}
                 </div>
               ) : (
@@ -1497,7 +1478,9 @@ export default function App() {
                                     <span className={`text-indigo-600 font-bold transition-transform duration-200 ${isCardOpen ? 'rotate-90' : ''}`}>
                                       ▶
                                     </span>
+                                    {/* key={donor.name} sayesinde başka bir kullanıcı ismi güncellerse input anında yenilenir */}
                                     <input
+                                      key={donor.name}
                                       type="text"
                                       defaultValue={donor.name}
                                       onClick={(e) => e.stopPropagation()}
