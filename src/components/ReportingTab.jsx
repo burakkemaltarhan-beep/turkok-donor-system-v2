@@ -1,15 +1,33 @@
-import React from 'react';
+import React, { useState } from 'react';
 
 const teamMembers = ["Burak", "Özkan", "Yiğit", "Batuhan", "Behlül", "Yunus"];
 const hospitals = ["İzmir Şehir Hastanesi", "Yeşilyurt", "Belirtilmedi"];
 const hospitalColors = ['#0ea5e9', '#6366f1', '#94a3b8']; // Sky, Indigo, Slate
 
 export default function ReportingTab({ donors = [] }) {
+  const [selectedReportYear, setSelectedReportYear] = useState('all');
+
+  // Dinamik olarak bağışçılardan mevcut yılları türetelim
+  const availableYears = Array.from(
+    new Set(
+      donors
+        .map((d) => d.healthCheck?.date?.split('-')[0])
+        .filter((y) => Boolean(y && y.length === 4))
+    )
+  ).sort().reverse();
+
+  // Seçilen yıla göre bağışçıları filtreleme
+  const filteredDonors = donors.filter((d) => {
+    if (selectedReportYear === 'all') return true;
+    const donorYear = d.healthCheck?.date ? d.healthCheck.date.split('-')[0] : '';
+    return donorYear === selectedReportYear;
+  });
+
   // 1. TAMAMLANAN SAĞLIK KONTROLLERİ HESAPLAMASI
   let hcTotal = 0;
   const hcHospitalCounts = [0, 0, 0];
 
-  donors.forEach((d) => {
+  filteredDonors.forEach((d) => {
     let hIndex = hospitals.indexOf(d.hospital);
     if (hIndex === -1) hIndex = 2; // Belirtilmedi
     if (d.healthCheck && d.healthCheck.completed) {
@@ -22,7 +40,7 @@ export default function ReportingTab({ donors = [] }) {
   let transplantTotal = 0;
   const transplantHospitalCounts = [0, 0, 0];
 
-  donors.forEach((d) => {
+  filteredDonors.forEach((d) => {
     let hIndex = hospitals.indexOf(d.hospital);
     if (hIndex === -1) hIndex = 2;
     if (d.vaccineDates && !d.vaccinePostponed) {
@@ -38,7 +56,7 @@ export default function ReportingTab({ donors = [] }) {
   const getCountsForField = (fieldKey) => {
     const counts = {};
     teamMembers.forEach((m) => (counts[m] = 0));
-    donors.forEach((d) => {
+    filteredDonors.forEach((d) => {
       const step = d[fieldKey];
       if (step && step.completed && step.completedBy) {
         if (counts[step.completedBy] !== undefined) {
@@ -53,7 +71,7 @@ export default function ReportingTab({ donors = [] }) {
   const getVaccineCounts = () => {
     const counts = {};
     teamMembers.forEach((m) => (counts[m] = 0));
-    donors.forEach((d) => {
+    filteredDonors.forEach((d) => {
       if (d.vaccineDates) {
         d.vaccineDates.forEach((v) => {
           if (v.completed && v.completedBy) {
@@ -78,12 +96,40 @@ export default function ReportingTab({ donors = [] }) {
 
   return (
     <div className="space-y-6">
+      {/* ÜST BİLGİ VE YIL FİLTRESİ */}
+      <div className="bg-white p-4 rounded-2xl shadow-xs border border-slate-200 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+        <div>
+          <h2 className="text-sm font-bold text-slate-800 flex items-center gap-2">
+            <span>📊</span> Detaylı Süreç ve Yıllık Raporlar
+          </h2>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Seçilen döneme ait operasyonel süreçlerin ve ekip performansının dökümü
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          <span className="text-xs font-semibold text-slate-600">Rapor Yılı:</span>
+          <select
+            value={selectedReportYear}
+            onChange={(e) => setSelectedReportYear(e.target.value)}
+            className="border border-indigo-200 bg-indigo-50/50 text-indigo-900 rounded-xl px-3 py-2 text-xs font-bold focus:outline-indigo-500 cursor-pointer flex-1 sm:flex-none"
+          >
+            <option value="all">Tüm Yıllar (Total)</option>
+            {availableYears.map((year) => (
+              <option key={year} value={year}>
+                {year} Yılı Raporu
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
       {/* 1. BÖLÜM: ÜST 2 BÜYÜK HASTANE ÖZET KARTI */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Sağlık Kontrolleri Kartı */}
         <div className="bg-white p-5 rounded-2xl shadow-xs border border-indigo-100 space-y-4">
           <h2 className="text-sm font-bold text-slate-700 text-center">
-            🏥 Tamamlanan Sağlık Kontrolleri
+            🏥 Tamamlanan Sağlık Kontrolleri ({selectedReportYear === 'all' ? 'Tüm Zamanlar' : selectedReportYear})
           </h2>
           <div className="text-center border-b border-slate-100 pb-3">
             <span className="text-5xl font-black text-indigo-600 tracking-tight block">
@@ -105,7 +151,7 @@ export default function ReportingTab({ donors = [] }) {
         {/* Nakiller (10. Doz Bitenler) Kartı */}
         <div className="bg-white p-5 rounded-2xl shadow-xs border border-emerald-100 space-y-4">
           <h2 className="text-sm font-bold text-slate-700 text-center">
-            💉 Tamamlanan Nakiller (10. Doz Bitenler)
+            💉 Tamamlanan Nakiller ({selectedReportYear === 'all' ? 'Tüm Zamanlar' : selectedReportYear})
           </h2>
           <div className="text-center border-b border-slate-100 pb-3">
             <span className="text-5xl font-black text-emerald-600 tracking-tight block">
@@ -129,7 +175,7 @@ export default function ReportingTab({ donors = [] }) {
       <div className="bg-white p-6 rounded-2xl shadow-xs border border-slate-200 space-y-5">
         <div>
           <h2 className="text-sm font-bold text-slate-800 flex items-center gap-2">
-            <span>📊</span> Personel Performans Raporları
+            <span>📊</span> Personel Performans Raporları ({selectedReportYear === 'all' ? 'Tüm Zamanlar' : selectedReportYear})
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
             Ekip üyelerinin tamamladığı operasyonel süreçlerin kişi bazlı dökümü
@@ -160,7 +206,6 @@ export default function ReportingTab({ donors = [] }) {
 function DoughnutSummary({ labels, values, colors, total }) {
   const sum = values.reduce((a, b) => a + b, 0);
 
-  // SVG Çember Çevresi Hesaplaması: 2 * PI * r (r=36 -> ~226.2)
   const radius = 36;
   const circumference = 2 * Math.PI * radius;
 
@@ -168,10 +213,8 @@ function DoughnutSummary({ labels, values, colors, total }) {
 
   return (
     <div className="flex flex-col sm:flex-row items-center justify-center gap-6 py-2">
-      {/* SVG Halka */}
       <div className="relative w-28 h-28 flex items-center justify-center shrink-0">
         <svg className="w-full h-full -rotate-90" viewBox="0 0 100 100">
-          {/* Arka plan çemberi */}
           <circle
             cx="50"
             cy="50"
@@ -211,7 +254,6 @@ function DoughnutSummary({ labels, values, colors, total }) {
         </div>
       </div>
 
-      {/* Lejant (Etiketler ve Sayılar) */}
       <div className="space-y-1.5 w-full sm:w-auto text-xs">
         {labels.map((hospital, idx) => {
           const count = values[idx] || 0;
@@ -239,7 +281,7 @@ function DoughnutSummary({ labels, values, colors, total }) {
 
 // PERSONEL PERFORMANS DİKEY ÇUBUK GRAFİĞİ BİLEŞENİ
 function VerticalBarChart({ data, barColor }) {
-  const maxVal = Math.max(...data.map((d) => d.count), 4); // Ölçeğin boş durmaması için min tepe değeri 4
+  const maxVal = Math.max(...data.map((d) => d.count), 4);
 
   return (
     <div className="h-44 pt-3 flex items-end justify-between gap-1.5 px-2">
@@ -251,7 +293,6 @@ function VerticalBarChart({ data, barColor }) {
             key={item.name}
             className="flex-1 flex flex-col items-center justify-end h-full group"
           >
-            {/* Sayı Rozeti */}
             <span
               className={`text-[10px] font-bold mb-1 transition ${
                 item.count > 0 ? 'text-slate-800 font-black' : 'text-slate-300'
@@ -260,7 +301,6 @@ function VerticalBarChart({ data, barColor }) {
               {item.count}
             </span>
 
-            {/* Dikey Çubuk */}
             <div className="w-full bg-slate-200/60 rounded-t-lg flex items-end h-28 overflow-hidden">
               <div
                 className="w-full rounded-t-lg transition-all duration-500 group-hover:brightness-90"
@@ -272,7 +312,6 @@ function VerticalBarChart({ data, barColor }) {
               />
             </div>
 
-            {/* Personel İsmi */}
             <span className="text-[10px] font-semibold text-slate-500 mt-1.5 truncate max-w-[42px] text-center">
               {item.name}
             </span>
